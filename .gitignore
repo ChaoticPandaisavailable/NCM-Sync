@@ -1,0 +1,44 @@
+node_modules/
+dist/
+release/
+test-results/
+playwright-report/
+.cloudmusic/
+songs/
+.claude/
+.agents/
+.codex/
+
+# The source checkout may coexist with a music library. Ignore unknown root
+# directories generically while keeping the public source directories tracked.
+/*/
+!/.github/
+!/assets/
+!/docs/
+!/scripts/
+!/src/
+!/tests/
+
+# Local music libraries and downloaded media are data, not source code.
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.aac
+*.ogg
+*.ncm
+*.mp4
+
+# Local secrets and machine-specific configuration.
+.env
+.env.*
+!.env.example
+
+# Editor and OS-generated files.
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+*.log
+*.partial
