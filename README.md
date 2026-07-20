@@ -20,7 +20,7 @@
 
 **使用NCM Sync让你的本地音乐库拥有在线服务般的体验！**
 
-![NCM Sync 主界面](docs/images/ncm-sync-overview.png)
+![NCM Sync 主界面](docs/images/ncm-sync-overview.png.png)
 
 ## 为什么使用 NCM Sync
 
