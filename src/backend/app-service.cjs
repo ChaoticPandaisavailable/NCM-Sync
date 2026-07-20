@@ -537,10 +537,26 @@ class AppService {
     const settings = this.db.getSettings();
     if (!settings.deleteRemoved) return;
     const latest = this.db.get('SELECT * FROM local_playlists WHERE id=?', [row.id]);
+    const removedTrackIds = [];
     for (const track of parseJson(latest.removed_json, [])) {
       const link = this.db.get('SELECT filename FROM playlist_tracks WHERE playlist_id=? AND track_id=?', [row.id, track.id]);
       if (link) await this.fileStore.removePlaylistLink(row.folder_name, link.filename);
       this.db.run('DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?', [row.id, track.id]);
+      removedTrackIds.push(track.id);
+    }
+    await this.pruneOrphanedSongs(removedTrackIds);
+  }
+
+  async pruneOrphanedSongs(trackIds = []) {
+    const ids = [...new Set(trackIds.map(String).filter(Boolean))];
+    const songs = ids.length
+      ? this.db.all(`SELECT * FROM songs WHERE track_id IN (${ids.map(() => '?').join(',')})`, ids)
+      : this.db.all('SELECT * FROM songs');
+    for (const song of songs) {
+      const references = this.db.get('SELECT COUNT(*) AS count FROM playlist_tracks WHERE track_id=?', [song.track_id]);
+      if (Number(references?.count) > 0) continue;
+      await this.fileStore.removeSongEntity(song.entity_path);
+      this.db.run('DELETE FROM songs WHERE track_id=?', [song.track_id]);
     }
   }
 
@@ -558,12 +574,16 @@ class AppService {
   }
 
   async removeLocal(ids) {
+    const removedTrackIds = [];
     for (const id of ids || []) {
       const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [id]);
       if (!row) continue;
+      removedTrackIds.push(...this.db.all('SELECT track_id FROM playlist_tracks WHERE playlist_id=?', [id]).map((track) => track.track_id));
       await this.fileStore.removePlaylistFolder(row.folder_name);
+      this.db.run('DELETE FROM playlist_tracks WHERE playlist_id=?', [id]);
       this.db.run('DELETE FROM local_playlists WHERE id=?', [id]);
     }
+    await this.pruneOrphanedSongs(removedTrackIds);
     return this.localPlaylists();
   }
 
@@ -671,17 +691,13 @@ class AppService {
     if (running) await running;
     if (deleteDownloaded) {
       const artifacts = this.tasks.takeArtifacts().reverse();
+      const removedTrackIds = [];
       for (const artifact of artifacts) {
         await this.fileStore.removePlaylistLink(artifact.folderName, artifact.filename);
         this.db.run('DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?', [artifact.playlistId, artifact.trackId]);
-        if (artifact.createdEntity) {
-          const references = this.db.get('SELECT COUNT(*) AS count FROM playlist_tracks WHERE track_id=?', [artifact.trackId]);
-          if (!references?.count) {
-            await fs.promises.rm(artifact.entityPath, { force: true });
-            this.db.run('DELETE FROM songs WHERE track_id=?', [artifact.trackId]);
-          }
-        }
+        removedTrackIds.push(artifact.trackId);
       }
+      await this.pruneOrphanedSongs(removedTrackIds);
     } else this.tasks.takeArtifacts();
     this.db.setSettings({ interruptedTask: false });
     return this.tasks.getState();

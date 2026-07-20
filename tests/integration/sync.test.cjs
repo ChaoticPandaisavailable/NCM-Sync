@@ -98,6 +98,49 @@ test('从在线歌单到 SQLite、实体文件和歌单硬链接的完整同步'
   assert.equal(fs.readdirSync(path.join(resetRoot, 'songs')).length, 0);
 });
 
+test('删除歌单曲目后只清理不再属于任何本地歌单的歌曲实体', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncmsync-orphan-cleanup-'));
+  t.after(() => {
+    assert.ok(path.basename(root).startsWith('ncmsync-orphan-cleanup-'));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const store = new FileStore(root);
+  const db = await new Database(path.join(store.dataPath, 'test.sqlite')).init();
+  const tasks = new TaskManager();
+  const service = new AppService({ db, fileStore: store, netease: new NeteaseClient({ mock: true }), tasks, rootPath: root });
+  service.start();
+  t.after(() => service.stop());
+
+  await service.setupUser('123456789');
+  await service.addLocal(['1001']);
+  service.startSync();
+  await waitFor(() => !tasks.active);
+
+  const original = service.localPlaylists()[0];
+  const sharedSong = db.get('SELECT * FROM songs WHERE track_id=?', ['501']);
+  const sharedId = 'local-shared-track';
+  db.run(`INSERT INTO local_playlists(id,online_id,name,folder_name,created_at,track_count,added_at,added_json,removed_json,existing_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`, [sharedId, 'shared', '共享曲目歌单', '共享曲目歌单', 0, 1, Date.now(), '[]', '[]', '[]']);
+  await store.createPlaylistLink(sharedSong.entity_path, '共享曲目歌单', path.basename(sharedSong.entity_path));
+  db.run('INSERT INTO playlist_tracks(playlist_id,track_id,filename,linked_at) VALUES (?,?,?,?)', [sharedId, '501', path.basename(sharedSong.entity_path), Date.now()]);
+
+  db.setSettings({ deleteRemoved: true });
+  db.run('UPDATE local_playlists SET removed_json=? WHERE id=?', [JSON.stringify([{ id: '501' }]), original.id]);
+  service.startSync([original.id]);
+  await waitFor(() => !tasks.active);
+
+  assert.ok(fs.existsSync(sharedSong.entity_path), '歌曲仍被另一份本地歌单引用时必须保留实体');
+  assert.equal(fs.existsSync(path.join(root, original.folderName, path.basename(sharedSong.entity_path))), false);
+  assert.equal(fs.existsSync(path.join(root, '共享曲目歌单', path.basename(sharedSong.entity_path))), true);
+
+  await service.removeLocal([sharedId]);
+  assert.equal(db.get('SELECT COUNT(*) AS count FROM playlist_tracks WHERE track_id=?', ['501']).count, 0, '数据库关系应在删除本地歌单时级联清理');
+  assert.equal(fs.existsSync(sharedSong.entity_path), false, '最后一个本地歌单引用被删除后应清理实体');
+  assert.equal(db.get('SELECT * FROM songs WHERE track_id=?', ['501']), null);
+  assert.equal(fs.readdirSync(path.join(root, 'songs')).length, 1, '未被删除的其他歌曲实体应保留');
+});
+
 test('自动扫描和实时同步复用可见任务状态，新添加歌单会立即并发下载', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncmsync-realtime-'));
   t.after(() => {

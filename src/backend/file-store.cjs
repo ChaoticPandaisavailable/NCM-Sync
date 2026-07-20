@@ -171,6 +171,14 @@ class FileStore {
     await fsp.rm(target, { force: true });
   }
 
+  async removeSongEntity(entityPath) {
+    const target = path.resolve(entityPath);
+    if (!isPathInside(this.songsPath, target) || target === this.songsPath) {
+      throw new Error('拒绝删除音乐库外的歌曲实体');
+    }
+    await fsp.rm(target, { force: true });
+  }
+
   async finishNcm(track, ncmPath) {
     const baseName = path.parse(trackFilename(track, 'mp3')).name;
     const decoded = await decodeNcm(ncmPath, path.join(this.songsPath, baseName));

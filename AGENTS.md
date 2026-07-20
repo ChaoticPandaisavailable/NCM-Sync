@@ -6,7 +6,7 @@ Windows GUI 桌面应用，将网易云音乐在线歌单增量同步到本地�
 
 ## 当前阶段
 
-**1.3.1 公开发布版。** 完整需求见 `prd.md`；公众使用、开发与安全说明见 `README.md`。
+**1.3.2 公开发布准备版。** 完整需求见 `prd.md`；公众使用、开发与安全说明见 `README.md`。
 
 - 桌面框架：Electron 43 + React 19 + Express 5 + sql.js
 - 开发入口：`npm.cmd run dev`
@@ -25,6 +25,8 @@ Windows GUI 桌面应用，将网易云音乐在线歌单增量同步到本地�
 | 同步策略 | 增量同步 | 只下载新增歌曲 |
 | 删除策略 | 默认保守 | 在线减少的歌曲需用户确认才删除 |
 | NCM | 内置流式解码 | 不依赖或配置外部 ncmdump/mcndump 程序 |
+
+项目源代码采用 GPL-3.0-only；第三方 MIT 组件的声明保留在 `THIRD_PARTY_NOTICES.md`。
 
 ## 源码结构
 
