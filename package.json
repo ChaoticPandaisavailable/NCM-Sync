@@ -16,7 +16,7 @@
     "test:installer": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/installer-smoke.ps1",
     "test:all": "npm test && npm run test:e2e",
     "screenshot:public": "npm run build && node scripts/capture-public-screenshot.cjs",
-    "dist": "npm run build && electron-builder --win nsis",
+    "dist": "npm run build && electron-builder --win nsis --publish never",
     "dist:dir": "npm run build && electron-builder --win dir"
   },
   "dependencies": {
