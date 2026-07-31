@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { parseJson, normalizeInterval, sanitizeName } = require('./utils.cjs');
 const { CancelledError } = require('./task-manager.cjs');
 const { FileStore } = require('./file-store.cjs');
+const { writeAudioTags } = require('./tag-writer.cjs');
 
 class AppService {
   constructor({ db, fileStore, netease, tasks, openPath = async () => '', rootPath, defaultLibraryPath = '', persistLibraryPath = async () => {}, realtimeIntervalMs = 15_000, downloadConcurrency = 4 }) {
@@ -325,6 +326,12 @@ class AppService {
       });
       known.add(track.id);
     }
+    this.db.transaction(() => {
+      for (const track of detail.tracks) {
+        if (!track.coverUrl) continue;
+        this.db.db.run('UPDATE songs SET cover_url=? WHERE track_id=? AND cover_url=?', [track.coverUrl, track.id, '']);
+      }
+    });
     const remoteIds = new Set(detail.tracks.map((item) => item.id));
     const current = this.db.all(`SELECT pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
       FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id WHERE pt.playlist_id=?`, [localId]);
@@ -430,6 +437,7 @@ class AppService {
         if (added.length) this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：0/${added.length}`, row.id]);
         await this.syncTracksConcurrently(row, added, control, (error) => { finalError = error.message; });
         await this.applyRemovals(row);
+        await this.ensureTrackCovers(row, control);
         const latest = this.db.get('SELECT * FROM local_playlists WHERE id=?', [row.id]);
         const remainingRemoved = this.db.getSettings().deleteRemoved ? [] : parseJson(latest.removed_json, []);
         const currentTracks = this.db.all(`SELECT pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
@@ -510,6 +518,64 @@ class AppService {
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
   }
 
+  async fetchCover(track, control) {
+    const url = track?.coverUrl || track?.cover_url;
+    if (!url) return null;
+    try {
+      const bytes = await this.netease.getCover(url, control?.signal);
+      return Buffer.isBuffer(bytes) && bytes.length ? bytes : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async writeTrackTags(entityPath, extension, track, source = {}, control) {
+    const artists = Array.isArray(track.artists) ? track.artists : parseJson(track.artists, []);
+    const meta = {
+      title: source.metadata?.musicName || track.name,
+      artist: flattenArtists(source.metadata?.artist) || artists.join(', '),
+      album: source.metadata?.album || track.album || '',
+      cover: source.cover || null
+    };
+    if (!meta.cover) meta.cover = await this.fetchCover(track, control);
+    if (entityPath && (extension === 'mp3' || extension === 'flac')) {
+      await writeAudioTags(entityPath, extension, meta);
+    }
+    return Boolean(meta.cover);
+  }
+
+  async ensureTrackCovers(row, control) {
+    const pending = this.db.all(`SELECT s.track_id,s.name,s.artists,s.album,s.entity_path,s.extension,s.cover_url
+      FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id
+      WHERE pt.playlist_id=? AND s.cover_url != '' AND s.cover_embedded = 0`, [row.id]);
+    if (!pending.length) return;
+    let nextIndex = 0;
+    let updated = false;
+    const worker = async () => {
+      while (true) {
+        await control.waitIfPaused();
+        control.throwIfCancelled();
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= pending.length) return;
+        const song = pending[index];
+        try {
+          const bytes = await this.netease.getCover(song.cover_url, control.signal);
+          if (!Buffer.isBuffer(bytes) || !bytes.length) continue;
+          const coverEmbedded = await this.writeTrackTags(song.entity_path, song.extension, song, { cover: bytes }, control);
+          const size = fs.statSync(song.entity_path).size;
+          this.db.run('UPDATE songs SET cover_embedded=?,size=? WHERE track_id=?', [coverEmbedded ? 1 : 0, size, song.track_id], false);
+          updated = true;
+        } catch (error) {
+          if (error instanceof CancelledError || error.name === 'AbortError') throw new CancelledError();
+          // 封面失败跳过，下次同步重试
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(this.downloadConcurrency, pending.length) }, () => worker()));
+    if (updated) this.db.save();
+  }
+
   async syncTrack(row, track, control) {
     let song = this.db.get('SELECT * FROM songs WHERE track_id=?', [track.id]);
     let downloaded;
@@ -519,11 +585,14 @@ class AppService {
       if (downloaded.encrypted) {
         downloaded = await this.fileStore.finishNcm(track, downloaded.ncmPath);
       }
-      this.db.run(`INSERT INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(track_id) DO UPDATE SET name=excluded.name,artists=excluded.artists,album=excluded.album,
-        duration=excluded.duration,entity_path=excluded.entity_path,extension=excluded.extension,size=excluded.size`, [
+      const coverEmbedded = await this.writeTrackTags(downloaded.entityPath, downloaded.extension, track, downloaded, control);
+      downloaded.size = fs.statSync(downloaded.entityPath).size;
+      this.db.run(`INSERT INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,cover_url,cover_embedded,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(track_id) DO UPDATE SET name=excluded.name,artists=excluded.artists,album=excluded.album,
+        duration=excluded.duration,entity_path=excluded.entity_path,extension=excluded.extension,size=excluded.size,
+        cover_url=excluded.cover_url,cover_embedded=excluded.cover_embedded`, [
         track.id, track.name, JSON.stringify(track.artists), track.album, track.duration, downloaded.entityPath,
-        downloaded.extension, downloaded.size, Date.now()
+        downloaded.extension, downloaded.size, track.coverUrl || '', coverEmbedded ? 1 : 0, Date.now()
       ]);
       song = this.db.get('SELECT * FROM songs WHERE track_id=?', [track.id]);
     }
@@ -706,6 +775,14 @@ class AppService {
 
 function dbTrack(row) {
   return { id: row.track_id, name: row.name, artists: parseJson(row.artists, []), album: row.album, duration: row.duration };
+}
+
+function flattenArtists(artist) {
+  if (!Array.isArray(artist)) return '';
+  return artist
+    .map((entry) => (Array.isArray(entry) ? entry[0] : entry))
+    .filter(Boolean)
+    .join(' / ');
 }
 
 function scanMessage(source) {

@@ -185,7 +185,15 @@ class FileStore {
     const finalPath = decoded.outputPath;
     await fsp.rm(ncmPath, { force: true });
     const stat = await fsp.stat(finalPath);
-    return { entityPath: finalPath, filename: path.basename(finalPath), extension: decoded.extension, size: stat.size, created: true };
+    return {
+      entityPath: finalPath,
+      filename: path.basename(finalPath),
+      extension: decoded.extension,
+      metadata: decoded.metadata,
+      cover: decoded.cover,
+      size: stat.size,
+      created: true
+    };
   }
 
   async migrateManagedLibrary(targetStore, playlists, songs, playlistTracks) {

@@ -46,6 +46,7 @@ function formatTrack(raw) {
     name: raw.name || `歌曲 ${raw.id}`,
     artists: (raw.ar || raw.artists || []).map((item) => item.name || item).filter(Boolean),
     album: raw.al?.name || raw.album?.name || raw.album || '',
+    coverUrl: raw.al?.picUrl || raw.picUrl || '',
     duration: raw.dt || raw.duration || 0
   };
 }

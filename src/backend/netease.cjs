@@ -68,8 +68,18 @@ class NeteaseClient {
     }));
   }
 
+  async getCover(url, signal) {
+    if (this.mock) return mockCover();
+    const response = await this.fetch(normalizeCoverUrl(url), { headers: this.headers(), redirect: 'follow', signal });
+    if (!response.ok) throw new Error(`封面下载失败 ${response.status}`);
+    return Buffer.from(await response.arrayBuffer());
+  }
+
   async getPlaylist(playlistId) {
-    if (this.mock) return mockPlaylistDetail(playlistId);
+    if (this.mock) {
+      const detail = mockPlaylistDetail(playlistId);
+      return { ...detail, tracks: detail.tracks.map(formatTrack) };
+    }
     const data = await this.json(`https://music.163.com/api/v6/playlist/detail?id=${encodeURIComponent(playlistId)}&n=1000&s=8`);
     if (!data.playlist) throw new Error('歌单已失效或无权访问');
     const playlist = data.playlist;
@@ -158,6 +168,20 @@ function cdnCandidates(value) {
   }
 }
 
+function normalizeCoverUrl(url) {
+  const parsed = new URL(url);
+  parsed.searchParams.set('param', '500y500');
+  return parsed.toString();
+}
+
+const MOCK_COVER = Buffer.from([
+  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+  0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x2d, 0x00, 0x40, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+  0xff, 0xd9
+]);
+
+function mockCover() { return MOCK_COVER; }
+
 function mockPlaylists(userId) {
   if (String(userId) === '0') throw new Error('未找到用户，请检查是否输入正确');
   return [
@@ -180,11 +204,11 @@ function mockPlaylistDetail(playlistId) {
   }
   const lists = {
     '1001': { id: '1001', name: '夜航测试集', tracks: [
-      { id: '501', name: 'Neon Run', artists: ['Test Artist'], album: 'Night', duration: 180000 },
-      { id: '502', name: 'Last Train', artists: ['Demo Unit'], album: 'Night', duration: 210000 }
+      { id: '501', name: 'Neon Run', artists: ['Test Artist'], album: 'Night', duration: 180000, al: { picUrl: 'https://mock.test/neon.jpg' } },
+      { id: '502', name: 'Last Train', artists: ['Demo Unit'], album: 'Night', duration: 210000, al: { picUrl: 'https://mock.test/train.jpg' } }
     ] },
     '1002': { id: '1002', name: '收藏节拍', tracks: [
-      { id: '503', name: 'Saved Groove', artists: ['Friend'], album: 'Box', duration: 160000 }
+      { id: '503', name: 'Saved Groove', artists: ['Friend'], album: 'Box', duration: 160000, al: { picUrl: 'https://mock.test/saved.jpg' } }
     ] }
   };
   const value = lists[String(playlistId)];
@@ -192,4 +216,4 @@ function mockPlaylistDetail(playlistId) {
   return { ...value, trackCount: value.tracks.length };
 }
 
-module.exports = { NeteaseClient, cdnCandidates, mockPlaylists, mockPlaylistDetail };
+module.exports = { NeteaseClient, cdnCandidates, normalizeCoverUrl, MOCK_COVER, mockPlaylists, mockPlaylistDetail };

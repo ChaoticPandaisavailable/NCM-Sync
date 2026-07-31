@@ -5,7 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { Database } = require('../../src/backend/database.cjs');
 const { FileStore } = require('../../src/backend/file-store.cjs');
-const { NeteaseClient } = require('../../src/backend/netease.cjs');
+const { NeteaseClient, MOCK_COVER } = require('../../src/backend/netease.cjs');
 const { TaskManager } = require('../../src/backend/task-manager.cjs');
 const { AppService } = require('../../src/backend/app-service.cjs');
 
@@ -50,6 +50,21 @@ test('从在线歌单到 SQLite、实体文件和歌单硬链接的完整同步'
   assert.equal(local.status, 'synced');
   assert.deepEqual(local.existing.map((track) => track.name).sort(), ['Last Train', 'Neon Run']);
   assert.deepEqual(local.existing.map((track) => track.artists[0]).sort(), ['Demo Unit', 'Test Artist']);
+
+  const entityFiles = fs.readdirSync(path.join(root, 'songs'));
+  for (const file of entityFiles) {
+    assert.ok(fs.readFileSync(path.join(root, 'songs', file)).includes(MOCK_COVER), '新下载的歌曲应嵌入封面');
+  }
+  for (const trackId of ['501', '502']) {
+    const song = db.get('SELECT * FROM songs WHERE track_id=?', [trackId]);
+    assert.equal(song.cover_embedded, 1);
+    assert.match(song.cover_url, /mock\.test/);
+  }
+
+  db.run('UPDATE songs SET cover_embedded=0 WHERE track_id=?', ['502']);
+  service.startSync();
+  await waitFor(() => !tasks.active);
+  assert.equal(db.get('SELECT * FROM songs WHERE track_id=?', ['502']).cover_embedded, 1, '缺封面的已下载歌曲应在同步时回填');
 
   const renamedDetail = await service.netease.getPlaylist('1001');
   await service.adoptAndDiff(local.id, { ...renamedDetail, name: '在线新名称' });

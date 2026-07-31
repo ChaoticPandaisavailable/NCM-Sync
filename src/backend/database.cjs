@@ -60,6 +60,8 @@ class Database {
         entity_path TEXT NOT NULL,
         extension TEXT NOT NULL DEFAULT 'mp3',
         size INTEGER NOT NULL DEFAULT 0,
+        cover_url TEXT NOT NULL DEFAULT '',
+        cover_embedded INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS playlist_tracks (
@@ -73,6 +75,7 @@ class Database {
       );
       CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
     `);
+    this.migrateSongs();
     const defaults = {
       userId: '', initialized: false, autoScan: false, autoSync: false, realtimeSync: false,
       scanHours: 1, scanMinutes: 0, deleteRemoved: false,
@@ -85,6 +88,17 @@ class Database {
     }
     this.save();
     return this;
+  }
+
+  migrateSongs() {
+    const columns = new Set(this.all('PRAGMA table_info(songs)').map((row) => row.name));
+    if (!columns.has('cover_url')) {
+      this.db.run(`ALTER TABLE songs ADD COLUMN cover_url TEXT NOT NULL DEFAULT ''`);
+    }
+    if (!columns.has('cover_embedded')) {
+      this.db.run(`ALTER TABLE songs ADD COLUMN cover_embedded INTEGER NOT NULL DEFAULT 0`);
+    }
+    this.save();
   }
 
   save() {

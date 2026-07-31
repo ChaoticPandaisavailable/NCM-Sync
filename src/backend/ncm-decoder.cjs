@@ -79,8 +79,9 @@ async function parseNcm(inputPath) {
     position += 9;
     const imageLength = (await readExact(handle, 4, position)).readUInt32LE(0); position += 4;
     if (imageLength > MAX_SECTION_SIZE || position + imageLength >= stat.size) throw new Error('NCM 封面区段损坏');
+    const cover = imageLength > 0 ? await readExact(handle, imageLength, position) : null;
     position += imageLength;
-    return { audioOffset: position, keyBox, metadata, size: stat.size };
+    return { audioOffset: position, keyBox, metadata, cover, size: stat.size };
   } finally { await handle.close(); }
 }
 
@@ -118,7 +119,7 @@ async function decodeNcm(inputPath, outputBasePath) {
       fs.createWriteStream(partialPath, { flags: 'w' })
     );
     await fsp.rename(partialPath, outputPath);
-    return { outputPath, extension, metadata: parsed.metadata };
+    return { outputPath, extension, metadata: parsed.metadata, cover: parsed.cover };
   } catch (error) {
     await fsp.rm(partialPath, { force: true });
     throw error;
