@@ -78,7 +78,7 @@ class Database {
     this.migrateSongs();
     const defaults = {
       userId: '', initialized: false, autoScan: false, autoSync: false, realtimeSync: false,
-      scanHours: 1, scanMinutes: 0, deleteRemoved: false,
+      scanHours: 1, scanMinutes: 0, deleteRemoved: false, downloadConcurrency: 4,
       renamePolicy: 'ask', cancelDeleteDownloaded: false,
       cancelDontAsk: false, removeLocalDontAsk: false, cookie: '', interruptedTask: false,
       lastGlobalStatus: '', libraryPath: '', lastScanAt: null, lastSyncAt: null

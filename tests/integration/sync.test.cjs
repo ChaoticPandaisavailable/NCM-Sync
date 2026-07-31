@@ -334,6 +334,29 @@ test('单曲下载失败时跳过该曲目并继续下载其余歌曲', async (t
   assert.equal(tasks.getState().paused, false, '单曲失败不应暂停整个任务');
 });
 
+test('设置中的下载并发数会应用到下次同步', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncmsync-concurrency-'));
+  t.after(() => {
+    assert.ok(path.basename(root).startsWith('ncmsync-concurrency-'));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const store = new FileStore(root);
+  const db = await new Database(path.join(store.dataPath, 'test.sqlite')).init();
+  const tasks = new TaskManager();
+  const service = new AppService({ db, fileStore: store, netease: new NeteaseClient({ mock: true }), tasks, rootPath: root });
+  service.start();
+  t.after(() => service.stop());
+
+  assert.equal(service.downloadConcurrency, 4, '默认并发应为 4');
+  service.updateSettings({ downloadConcurrency: 6 });
+  assert.equal(service.downloadConcurrency, 6);
+  await service.setupUser('123456789');
+  await service.addLocal(['1001']);
+  const task = service.startSync();
+  assert.equal(task.concurrency, 6, '下次同步应使用设置中的并发');
+  await waitFor(() => !tasks.active);
+});
+
 async function waitFor(predicate, timeout = 5000) {
   const started = Date.now();
   while (!predicate()) {

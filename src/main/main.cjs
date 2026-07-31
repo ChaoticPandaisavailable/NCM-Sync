@@ -136,7 +136,7 @@ async function boot() {
     defaultLibraryPath: initialDefaultLibraryPath,
     persistLibraryPath,
     realtimeIntervalMs: Number(process.env.CLOUDMUSIC_REALTIME_INTERVAL_MS) || 15_000,
-    downloadConcurrency: Number(process.env.CLOUDMUSIC_DOWNLOAD_CONCURRENCY) || 4
+    downloadConcurrency: process.env.CLOUDMUSIC_DOWNLOAD_CONCURRENCY ? Number(process.env.CLOUDMUSIC_DOWNLOAD_CONCURRENCY) : undefined
   });
   service.start();
   const devUrl = process.env.CLOUDMUSIC_DEV_URL;

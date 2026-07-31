@@ -9,7 +9,7 @@ const { writeAudioTags } = require('./tag-writer.cjs');
 const MAX_TRACK_ATTEMPTS = 2;
 
 class AppService {
-  constructor({ db, fileStore, netease, tasks, openPath = async () => '', rootPath, defaultLibraryPath = '', persistLibraryPath = async () => {}, realtimeIntervalMs = 15_000, downloadConcurrency = 4 }) {
+  constructor({ db, fileStore, netease, tasks, openPath = async () => '', rootPath, defaultLibraryPath = '', persistLibraryPath = async () => {}, realtimeIntervalMs = 15_000, downloadConcurrency }) {
     this.db = db;
     this.fileStore = fileStore;
     this.netease = netease;
@@ -27,7 +27,8 @@ class AppService {
     this.realtimeCyclePromise = null;
     this.pendingRealtimeIds = new Set();
     this.realtimeIntervalMs = Math.max(1_000, Number(realtimeIntervalMs) || 15_000);
-    this.downloadConcurrency = Math.max(1, Math.min(8, Math.floor(Number(downloadConcurrency) || 4)));
+    const configured = Number(downloadConcurrency ?? this.db.getSettings().downloadConcurrency);
+    this.downloadConcurrency = Math.max(1, Math.min(8, Math.floor(configured) || 4));
     this.syncPromise = null;
     this.startupScanPromise = null;
   }
@@ -532,7 +533,7 @@ class AppService {
     }
   }
 
-  async writeTrackTags(entityPath, extension, track, source = {}, control) {
+  async writeTrackTags(entityPath, extension, track, source = {}) {
     const artists = Array.isArray(track.artists) ? track.artists : parseJson(track.artists, []);
     const meta = {
       title: source.metadata?.musicName || track.name,
@@ -540,7 +541,6 @@ class AppService {
       album: source.metadata?.album || track.album || '',
       cover: source.cover || null
     };
-    if (!meta.cover) meta.cover = await this.fetchCover(track, control);
     if (entityPath && (extension === 'mp3' || extension === 'flac')) {
       await writeAudioTags(entityPath, extension, meta);
     }
@@ -565,7 +565,7 @@ class AppService {
         try {
           const bytes = await this.netease.getCover(song.cover_url, control.signal);
           if (!Buffer.isBuffer(bytes) || !bytes.length) continue;
-          const coverEmbedded = await this.writeTrackTags(song.entity_path, song.extension, song, { cover: bytes }, control);
+          const coverEmbedded = await this.writeTrackTags(song.entity_path, song.extension, song, { cover: bytes });
           const size = fs.statSync(song.entity_path).size;
           this.db.run('UPDATE songs SET cover_embedded=?,size=? WHERE track_id=?', [coverEmbedded ? 1 : 0, size, song.track_id], false);
           updated = true;
@@ -582,13 +582,14 @@ class AppService {
   async syncTrack(row, track, control) {
     let song = this.db.get('SELECT * FROM songs WHERE track_id=?', [track.id]);
     let downloaded;
+    let needsCover = false;
     if (!song || !fs.existsSync(song.entity_path) || fs.statSync(song.entity_path).size === 0) {
       const response = await this.netease.getAudioResponse(track.id, control.signal);
       downloaded = await this.fileStore.downloadTrack(track, response, control);
       if (downloaded.encrypted) {
         downloaded = await this.fileStore.finishNcm(track, downloaded.ncmPath);
       }
-      const coverEmbedded = await this.writeTrackTags(downloaded.entityPath, downloaded.extension, track, downloaded, control);
+      const coverEmbedded = await this.writeTrackTags(downloaded.entityPath, downloaded.extension, track, { ...downloaded, cover: downloaded.cover || null });
       downloaded.size = fs.statSync(downloaded.entityPath).size;
       this.db.run(`INSERT INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,cover_url,cover_embedded,created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(track_id) DO UPDATE SET name=excluded.name,artists=excluded.artists,album=excluded.album,
@@ -598,11 +599,19 @@ class AppService {
         downloaded.extension, downloaded.size, track.coverUrl || '', coverEmbedded ? 1 : 0, Date.now()
       ]);
       song = this.db.get('SELECT * FROM songs WHERE track_id=?', [track.id]);
+      needsCover = !coverEmbedded && Boolean(track.coverUrl);
     }
     const filename = path.basename(song.entity_path);
     await this.fileStore.createPlaylistLink(song.entity_path, row.folder_name, filename);
     this.db.run('INSERT OR REPLACE INTO playlist_tracks(playlist_id,track_id,filename,linked_at) VALUES (?,?,?,?)', [row.id, track.id, filename, Date.now()]);
     this.tasks.recordArtifact({ playlistId: row.id, trackId: track.id, folderName: row.folder_name, filename, entityPath: song.entity_path, createdEntity: Boolean(downloaded?.created) });
+    if (needsCover) {
+      const fetched = await this.fetchCover(track, control);
+      if (fetched) {
+        await this.writeTrackTags(song.entity_path, song.extension, song, { cover: fetched });
+        this.db.run('UPDATE songs SET cover_embedded=1,size=? WHERE track_id=?', [fs.statSync(song.entity_path).size, track.id]);
+      }
+    }
   }
 
   async applyRemovals(row) {
@@ -744,12 +753,16 @@ class AppService {
 
   updateSettings(values) {
     const current = this.db.getSettings();
-    const allowed = ['autoScan','autoSync','realtimeSync','scanHours','scanMinutes','deleteRemoved','renamePolicy','cancelDeleteDownloaded','cancelDontAsk','removeLocalDontAsk','cookie'];
+    const allowed = ['autoScan','autoSync','realtimeSync','scanHours','scanMinutes','deleteRemoved','downloadConcurrency','renamePolicy','cancelDeleteDownloaded','cancelDontAsk','removeLocalDontAsk','cookie'];
     const next = {};
     for (const key of allowed) if (Object.hasOwn(values, key)) next[key] = values[key];
     if (next.cookie === '••••••••') delete next.cookie;
     const interval = normalizeInterval(next.scanHours ?? current.scanHours, next.scanMinutes ?? current.scanMinutes);
     next.scanHours = interval.hours; next.scanMinutes = interval.minutes;
+    if (Object.hasOwn(next, 'downloadConcurrency')) {
+      next.downloadConcurrency = Math.max(1, Math.min(8, Math.floor(Number(next.downloadConcurrency) || 4)));
+      this.downloadConcurrency = next.downloadConcurrency;
+    }
     this.db.setSettings(next);
     this.netease.setCookie(this.db.getSettings().cookie);
     this.configureAutoScan();
