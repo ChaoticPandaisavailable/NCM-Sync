@@ -6,6 +6,8 @@ const { CancelledError } = require('./task-manager.cjs');
 const { FileStore } = require('./file-store.cjs');
 const { writeAudioTags } = require('./tag-writer.cjs');
 
+const MAX_TRACK_ATTEMPTS = 2;
+
 class AppService {
   constructor({ db, fileStore, netease, tasks, openPath = async () => '', rootPath, defaultLibraryPath = '', persistLibraryPath = async () => {}, realtimeIntervalMs = 15_000, downloadConcurrency = 4 }) {
     this.db = db;
@@ -421,6 +423,7 @@ class AppService {
 
   async runSync(rows, control) {
     let finalError = '';
+    const allFailures = [];
     try {
       for (let index = 0; index < rows.length; index += 1) {
         control.throwIfCancelled();
@@ -435,20 +438,23 @@ class AppService {
         }
         this.tasks.update({ current: index + 1, playlistId: row.id, downloaded: 0, downloadTotal: added.length, error: '' });
         if (added.length) this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：0/${added.length}`, row.id]);
-        await this.syncTracksConcurrently(row, added, control, (error) => { finalError = error.message; });
+        const failures = await this.syncTracksConcurrently(row, added, control);
         await this.applyRemovals(row);
         await this.ensureTrackCovers(row, control);
+        allFailures.push(...failures);
         const latest = this.db.get('SELECT * FROM local_playlists WHERE id=?', [row.id]);
         const remainingRemoved = this.db.getSettings().deleteRemoved ? [] : parseJson(latest.removed_json, []);
         const currentTracks = this.db.all(`SELECT pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
           FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id WHERE pt.playlist_id=?`, [row.id]).map(dbTrack);
-        this.db.run(`UPDATE local_playlists SET added_json='[]',removed_json=?,existing_json=?,track_count=?,last_sync_at=?,sync_progress=NULL,error=NULL WHERE id=?`, [
-          JSON.stringify(remainingRemoved), JSON.stringify(currentTracks), currentTracks.length, Date.now(), row.id
+        this.db.run(`UPDATE local_playlists SET added_json=?,removed_json=?,existing_json=?,track_count=?,last_sync_at=?,sync_progress=NULL,error=NULL WHERE id=?`, [
+          JSON.stringify(failures.map((item) => item.track)), JSON.stringify(remainingRemoved), JSON.stringify(currentTracks), currentTracks.length, Date.now(), row.id
         ]);
       }
       finalError = '';
       this.db.setSettings({ interruptedTask: false, lastSyncAt: Date.now() });
-      this.scanStatus = '同步完成';
+      this.scanStatus = allFailures.length
+        ? `同步完成，${allFailures.length} 首下载失败已跳过`
+        : '同步完成';
     } catch (error) {
       if (!(error instanceof CancelledError)) finalError = error.message;
       if (error instanceof CancelledError) this.scanStatus = '同步任务已取消';
@@ -466,8 +472,9 @@ class AppService {
     }
   }
 
-  async syncTracksConcurrently(row, tracks, control, onFailure) {
-    if (!tracks.length) return;
+  async syncTracksConcurrently(row, tracks, control) {
+    if (!tracks.length) return [];
+    const failures = [];
     let nextIndex = 0;
     let completed = 0;
     let activeDownloads = 0;
@@ -479,43 +486,39 @@ class AppService {
         nextIndex += 1;
         if (trackIndex >= tracks.length) return;
         const track = tracks[trackIndex];
-        let success = false;
-        while (!success) {
-          let countedActive = false;
-          try {
-            await control.waitIfPaused();
-            control.throwIfCancelled();
-            activeDownloads += 1;
-            countedActive = true;
+        let countedActive = false;
+        try {
+          await control.waitIfPaused();
+          control.throwIfCancelled();
+          activeDownloads += 1;
+          countedActive = true;
+          this.tasks.update({ activeDownloads });
+          let lastError = null;
+          for (let attempt = 0; attempt < MAX_TRACK_ATTEMPTS; attempt += 1) {
+            try {
+              await this.syncTrack(row, track, control);
+              completed += 1;
+              this.tasks.update({ downloaded: completed, error: '' });
+              this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：${completed}/${tracks.length}`, row.id]);
+              lastError = null;
+              break;
+            } catch (error) {
+              if (error instanceof CancelledError || error.name === 'AbortError') throw new CancelledError();
+              lastError = error;
+            }
+          }
+          if (lastError) failures.push({ track, error: lastError });
+        } finally {
+          if (countedActive) {
+            activeDownloads = Math.max(0, activeDownloads - 1);
             this.tasks.update({ activeDownloads });
-            await this.syncTrack(row, track, control);
-            success = true;
-            completed += 1;
-            this.tasks.update({ downloaded: completed, ...(this.tasks.paused ? {} : { error: '' }) });
-            this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：${completed}/${tracks.length}`, row.id]);
-          } catch (error) {
-            if (error instanceof CancelledError || error.name === 'AbortError') throw new CancelledError();
-            if (countedActive) {
-              activeDownloads = Math.max(0, activeDownloads - 1);
-              countedActive = false;
-              this.tasks.update({ activeDownloads });
-            }
-            onFailure(error);
-            this.db.run('UPDATE local_playlists SET error=?,sync_progress=? WHERE id=?', [error.message, '任务已暂停', row.id]);
-            this.tasks.update({ error: `同步失败：${error.message}，当前任务已暂停` });
-            this.tasks.pause();
-            await control.waitIfPaused();
-          } finally {
-            if (countedActive) {
-              activeDownloads = Math.max(0, activeDownloads - 1);
-              this.tasks.update({ activeDownloads });
-            }
           }
         }
       }
     };
     const workerCount = Math.min(this.downloadConcurrency, tracks.length);
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return failures;
   }
 
   async fetchCover(track, control) {

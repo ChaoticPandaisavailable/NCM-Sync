@@ -297,6 +297,43 @@ test('首次设置和后续切换音乐库会自动识别在线歌单同名文�
   assert.equal(fs.existsSync(path.join(nextRoot, '夜航测试集')), true, '没有现有文件夹的原本地歌单仍应保留空目录占位');
 });
 
+test('单曲下载失败时跳过该曲目并继续下载其余歌曲', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncmsync-skip-fail-'));
+  t.after(() => {
+    assert.ok(path.basename(root).startsWith('ncmsync-skip-fail-'));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const store = new FileStore(root);
+  const db = await new Database(path.join(store.dataPath, 'test.sqlite')).init();
+  const tasks = new TaskManager();
+  const netease = new NeteaseClient({ mock: true });
+  const originalGetAudio = netease.getAudioResponse.bind(netease);
+  netease.getAudioResponse = async (trackId, signal) => {
+    if (String(trackId) === '502') {
+      throw new Error('歌曲无可用音源：音源代码 404。请确认会员或数字专辑权限，或稍后重试');
+    }
+    return originalGetAudio(trackId, signal);
+  };
+  const service = new AppService({ db, fileStore: store, netease, tasks, rootPath: root, downloadConcurrency: 2 });
+  service.start();
+  t.after(() => service.stop());
+
+  await service.setupUser('123456789');
+  await service.addLocal(['1001']);
+  service.startSync();
+  await waitFor(() => !tasks.active);
+
+  const local = service.localPlaylists()[0];
+  assert.equal(local.existing.length, 1, '可用的曲目应已下载');
+  assert.equal(local.existing[0].id, '501');
+  assert.equal(local.added.length, 1, '失败曲目应保留在待下载列表');
+  assert.equal(local.added[0].id, '502');
+  assert.equal(db.get('SELECT COUNT(*) AS c FROM songs WHERE track_id=?', ['501']).c, 1);
+  assert.equal(db.get('SELECT COUNT(*) AS c FROM songs WHERE track_id=?', ['502']).c, 0);
+  assert.match(service.bootstrap().scanStatus, /1 首下载失败已跳过/);
+  assert.equal(tasks.getState().paused, false, '单曲失败不应暂停整个任务');
+});
+
 async function waitFor(predicate, timeout = 5000) {
   const started = Date.now();
   while (!predicate()) {

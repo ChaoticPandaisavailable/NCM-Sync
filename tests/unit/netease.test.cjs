@@ -37,6 +37,27 @@ test('播放器接口没有地址时回退到旧外链', async () => {
   assert.equal(response.status, 200);
 });
 
+test('超高品质音源 404 时逐级降级到标准品质', async () => {
+  const levels = [];
+  const fetchImpl = async (url) => {
+    if (String(url).includes('/api/song/enhance/player/url/v1')) {
+      const level = new URL(url).searchParams.get('level');
+      levels.push(level);
+      if (level === 'standard') {
+        return Response.json({ code: 200, data: [{ code: 200, url: 'https://m701.music.126.net/std.mp3?authSecret=signed' }] });
+      }
+      return Response.json({ code: 200, data: [{ code: 404, url: null }] });
+    }
+    if (String(url).includes('m701.music.126.net')) {
+      return new Response('ID3-standard', { status: 200, headers: { 'content-type': 'audio/mpeg' } });
+    }
+    throw new Error(`不应请求 ${url}`);
+  };
+  const response = await new NeteaseClient({ fetchImpl }).getAudioResponse('7');
+  assert.equal(response.status, 200);
+  assert.deepEqual(levels, ['exhigh', 'higher', 'standard']);
+});
+
 test('CDN 回退只改写网易云官方音频域名并保留签名', () => {
   const urls = cdnCandidates('http://m804.music.126.net/a.mp3?authSecret=abc');
   assert.equal(urls.length, 3);

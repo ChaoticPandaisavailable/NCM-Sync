@@ -123,14 +123,19 @@ class NeteaseClient {
     }
     const candidates = [];
     let playerError = '';
-    try {
-      const ids = encodeURIComponent(JSON.stringify([Number(trackId)]));
-      const data = await this.json(`https://music.163.com/api/song/enhance/player/url/v1?ids=${ids}&level=exhigh&encodeType=mp3`);
-      const audio = data.data?.[0];
-      if (audio?.url && audio.code === 200) candidates.push(...cdnCandidates(audio.url));
-      else playerError = audio?.message || (audio?.code ? `音源代码 ${audio.code}` : '账号没有可用播放地址');
-    } catch (error) {
-      playerError = error.message;
+    const ids = encodeURIComponent(JSON.stringify([Number(trackId)]));
+    for (const level of ['exhigh', 'higher', 'standard']) {
+      try {
+        const data = await this.json(`https://music.163.com/api/song/enhance/player/url/v1?ids=${ids}&level=${level}&encodeType=mp3`);
+        const audio = data.data?.[0];
+        if (audio?.url && audio.code === 200) {
+          candidates.push(...cdnCandidates(audio.url));
+          break;
+        }
+        if (!playerError) playerError = audio?.message || (audio?.code ? `音源代码 ${audio.code}` : '账号没有可用播放地址');
+      } catch (error) {
+        if (!playerError) playerError = error.message;
+      }
     }
     candidates.push(`https://music.163.com/song/media/outer/url?id=${encodeURIComponent(trackId)}.mp3`);
 
