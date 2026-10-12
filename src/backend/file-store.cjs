@@ -13,14 +13,44 @@ class FileStore {
     fs.mkdirSync(this.dataPath, { recursive: true });
   }
 
-  playlistPath(folderName) { return path.join(this.rootPath, folderName); }
+  playlistPath(folderName) {
+    const target = path.resolve(this.rootPath, String(folderName || ''));
+    const relative = path.relative(this.rootPath, target);
+    const first = relative.split(path.sep)[0].toLowerCase();
+    if (!relative || !isPathInside(this.rootPath, target) || ['songs', '.cloudmusic'].includes(first)) {
+      throw new Error('歌单目录必须位于音乐库内，且不能使用实体库或应用数据目录');
+    }
+    let current = this.rootPath;
+    for (const part of relative.split(path.sep)) {
+      current = path.join(current, part);
+      let stat;
+      try { stat = fs.lstatSync(current); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (stat?.isSymbolicLink()) throw new Error('歌单目录不能包含符号链接或目录联接');
+    }
+    return target;
+  }
 
-  listPlaylistFolders() {
+  relativePlaylistPath(folderPath) { return path.relative(this.rootPath, this.playlistPath(folderPath)); }
+
+  async listPlaylistFolders() {
     if (!fs.existsSync(this.rootPath)) return [];
     const reserved = new Set([path.basename(this.songsPath), path.basename(this.dataPath)].map((name) => name.toLowerCase()));
-    return fs.readdirSync(this.rootPath, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !reserved.has(entry.name.toLowerCase()))
-      .map((entry) => entry.name);
+    const folders = [];
+    const pending = [''];
+    while (pending.length) {
+      const parent = pending.pop();
+      let entries;
+      try { entries = await fsp.readdir(path.join(this.rootPath, parent), { withFileTypes: true }); }
+      catch (error) { if (['EACCES', 'EPERM', 'ENOENT'].includes(error.code)) continue; throw error; }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || (!parent && reserved.has(entry.name.toLowerCase()))) continue;
+        const relative = path.join(parent, entry.name);
+        folders.push(relative);
+        pending.push(relative);
+      }
+    }
+    return folders;
   }
 
   ensurePlaylistFolder(folderName) {
@@ -44,18 +74,18 @@ class FileStore {
     if (!fs.existsSync(folderPath)) return [];
     return fs.readdirSync(folderPath, { withFileTypes: true })
       .filter((entry) => entry.isFile() && /\.(mp3|flac|wav|m4a|aac|ogg)$/i.test(entry.name))
-      .map((entry) => ({ name: entry.name, path: path.join(folderPath, entry.name) }));
+      .map((entry) => ({ name: entry.name, path: path.join(folderPath, entry.name), normalized: normalizeText(path.parse(entry.name).name.replace(/\[\d+\]$/, '')) }));
   }
 
-  detectMovedFolder(expectedName, knownFilenames, managedFolders = []) {
+  async detectMovedFolder(expectedName, knownFilenames, managedFolders = [], folders) {
     if (!knownFilenames.length) return null;
     const excluded = new Set(['songs', '.cloudmusic', expectedName, ...managedFolders].map((name) => String(name).toLowerCase()));
-    const candidates = fs.readdirSync(this.rootPath, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !excluded.has(entry.name.toLowerCase()))
-      .map((entry) => {
-        const names = new Set(fs.readdirSync(path.join(this.rootPath, entry.name), { withFileTypes: true }).filter((item) => item.isFile()).map((item) => item.name.toLowerCase()));
+    const candidates = (folders || await this.listPlaylistFolders())
+      .filter((name) => !excluded.has(name.toLowerCase()))
+      .map((name) => {
+        const names = new Set(fs.readdirSync(this.playlistPath(name), { withFileTypes: true }).filter((item) => item.isFile()).map((item) => item.name.toLowerCase()));
         const matches = knownFilenames.filter((name) => names.has(name.toLowerCase())).length;
-        return { name: entry.name, matches };
+        return { name, matches };
       }).filter((item) => item.matches > 0).sort((a, b) => b.matches - a.matches);
     if (!candidates.length || (candidates[1] && candidates[0].matches === candidates[1].matches)) return null;
     return candidates[0].name;
@@ -65,7 +95,7 @@ class FileStore {
     const title = normalizeText(track.name);
     const artists = (track.artists || []).map(normalizeText).filter(Boolean);
     const candidates = files.filter((file) => !claimed.has(file.path)).map((file) => {
-      const normalized = normalizeText(path.parse(file.name).name.replace(/\[\d+\]$/, ''));
+      const normalized = file.normalized ?? normalizeText(path.parse(file.name).name.replace(/\[\d+\]$/, ''));
       let score = title && normalized.includes(title) ? 5 : 0;
       if (artists.some((artist) => normalized.includes(artist))) score += 2;
       if (normalized === normalizeText(`${artists[0] || ''}${title}`) || normalized === normalizeText(`${title}${artists[0] || ''}`)) score += 4;
@@ -94,8 +124,11 @@ class FileStore {
   async createPlaylistLink(entityPath, folderName, filename) {
     const folderPath = this.ensurePlaylistFolder(folderName);
     const targetPath = path.join(folderPath, filename);
-    if (!isPathInside(folderPath, targetPath)) throw new Error('歌曲文件名不安全');
-    if (fs.existsSync(targetPath)) return targetPath;
+    if (path.basename(filename) !== filename || !isPathInside(folderPath, targetPath)) throw new Error('歌曲文件名不安全');
+    if (fs.existsSync(targetPath)) {
+      if (fs.lstatSync(targetPath).isSymbolicLink()) throw new Error('歌曲路径不能是符号链接');
+      return targetPath;
+    }
     try { await fsp.link(entityPath, targetPath); }
     catch (error) {
       if (error.code !== 'EXDEV') throw error;
@@ -157,17 +190,17 @@ class FileStore {
 
   async renamePlaylistFolder(oldName, newName) {
     const from = this.playlistPath(oldName);
-    const to = this.playlistPath(sanitizeName(newName));
+    const to = this.playlistPath(path.join(path.dirname(oldName), sanitizeName(newName)));
     if (!isPathInside(this.rootPath, from) || !isPathInside(this.rootPath, to)) throw new Error('目录名称不安全');
     if (fs.existsSync(to)) throw new Error('目标文件夹已存在');
     await fsp.rename(from, to);
-    return path.basename(to);
+    return path.relative(this.rootPath, to);
   }
 
   async removePlaylistLink(folderName, filename) {
     const folderPath = this.playlistPath(folderName);
     const target = path.join(folderPath, filename);
-    if (!isPathInside(folderPath, target)) throw new Error('歌曲路径不安全');
+    if (path.basename(filename) !== filename || !isPathInside(folderPath, target)) throw new Error('歌曲路径不安全');
     await fsp.rm(target, { force: true });
   }
 

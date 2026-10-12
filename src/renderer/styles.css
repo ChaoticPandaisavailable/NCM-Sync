@@ -195,6 +195,45 @@ button.primary, .primary { border-color: #ff3457 !important; color: white !impor
 .dialog > header button { position: relative; z-index: 4; flex: 0 0 32px; width: 32px; height: 32px; pointer-events: auto; touch-action: manipulation; }
 .track-list-frame { min-height: 0; display: flex; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
 .track-list-frame > .track-list { flex: 1 1 auto; }
+
+.local-name .playlist-path { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: #a8b6ca; }
+.mapping-link, .map-online-button { color: #aebdd2; background: transparent; border: 0; cursor: pointer; }
+.mapping-link { padding: 0; font-size: 10px; text-align: left; justify-self: start; }
+.mapping-link:hover { color: #fff; text-decoration: underline; }
+.map-online-button { margin-top: 8px; padding: 8px; font-size: 11px; }
+.map-online-button:hover { background: #1d2b42; border-radius: 8px; }
+.playlist-editor { min-height: 0; outline: none; }
+.editor-toolbar { padding: 12px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.editor-toolbar p { margin: 0; color: #b3c0d2; font-size: 12px; }
+.editor-toolbar > div { display: flex; gap: 8px; flex-shrink: 0; }
+.editor-toolbar button, .track-actions button, .mapping-path button { min-height: 30px; padding: 4px 10px; color: #dce5f3; border: 1px solid #41516a; border-radius: 6px; background: #19273b; cursor: pointer; }
+.editor-toolbar button:hover, .track-actions button:hover, .mapping-path button:hover { background: #293a52; }
+.editor-grid { min-height: 300px; }
+.editor-grid h4 { font-size: 12px; }
+.editor-grid h4 small { display: block; font-size: 11px; font-weight: 400; color: #b3c0d2; letter-spacing: normal; margin-top: 6px; }
+.editor-grid .drag-over { outline: 2px solid #ff7890; outline-offset: -2px; background: #2c1b2b; }
+.editor-track-frame { display: flex; flex-direction: column; min-height: 0; }
+.editor-track-list { max-height: 42vh; min-height: 260px; overflow: auto; padding: 0 14px; }
+.editor-track { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 8px; padding: 12px 0; border-bottom: 1px solid #29364a; cursor: grab; user-select: none; }
+.editor-track[draggable=false] { cursor: default; }
+.editor-track strong, .editor-track > span { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-track strong { font-size: 12px; color: #e3eaf6; }
+.editor-track > span, .editor-track small { color: #b3c0d2; font-size: 11px; }
+.editor-track small { align-self: center; }
+.track-actions { display: flex; gap: 5px; }
+.track-actions button { font-size: 10px; min-height: 28px; padding: 3px 7px; }
+.editor-status, .editor-notice { color: #b3c0d2; font-size: 11px; line-height: 1.7; padding: 10px 18px; margin: 0; }
+.editor-notice { color: #ffd08b; background: #31271b; }
+.mapping-form { padding: 20px 22px 0; }
+.mapping-form > label { display: grid; gap: 8px; margin-bottom: 18px; color: #cbd5e6; font-size: 12px; }
+.mapping-form select, .mapping-form input { width: 100%; padding: 10px 12px; border: 1px solid #41516a; border-radius: 7px; background: #0e1828; color: #e3eaf6; min-width: 0; }
+.mapping-form input::placeholder { color: #a2b1c6; }
+.mapping-path { display: flex; gap: 8px; }
+.mapping-path button { flex: none; }
+.mapping-root { overflow-wrap: anywhere; color: #b3c0d2; font-size: 11px; }
+.mapping-form .hint { color: #b3c0d2; font-size: 11px; }
+.mapping-form .modal-actions { margin: 20px -22px 0; }
+.editor-toolbar button:focus-visible, .track-actions button:focus-visible, .mapping-link:focus-visible, .map-online-button:focus-visible, .mapping-form :focus-visible { outline: 2px solid #ff7890; outline-offset: 2px; }
 .track-pagination { min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 7px 14px; border-top: 1px solid #29364a; background: #0e1726; color: #77879c; font-size: 9px; }
 .track-pagination button { min-width: 66px; height: 27px; border: 1px solid #35445a; border-radius: 7px; color: #b5c0ce; background: #172236; cursor: pointer; }
 .track-pagination button:hover:not(:disabled) { border-color: #5a3540; background: #251821; }

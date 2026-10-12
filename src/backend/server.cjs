@@ -16,7 +16,10 @@ function createServer({ service, staticPath, port = 0, rendererOrigin = '' }) {
   });
   app.use(express.json({ limit: '1mb' }));
 
-  app.get('/api/bootstrap', (_req, res) => res.json(service.bootstrap()));
+  app.get('/api/bootstrap', (_req, res) => res.json(service.bootstrap({ summary: true })));
+  app.get('/api/local/:id', asyncHandler(async (req, res) => res.json(service.localDetail(req.params.id))));
+  app.post('/api/local/map', asyncHandler(async (req, res) => res.json(await service.mapPlaylist(req.body.onlineId, req.body.folderPath, req.body.localId))));
+  app.put('/api/local/:id/choices', asyncHandler(async (req, res) => res.json(await service.saveTrackChoices(req.params.id, req.body.revision, req.body.changes))));
   app.post('/api/setup', asyncHandler(async (req, res) => res.json(await service.setupUser(req.body.userId, Boolean(req.body.changing)))));
   app.post('/api/setup/later', (_req, res) => res.json(service.dismissSetup()));
   app.post('/api/online/refresh', asyncHandler(async (_req, res) => res.json({ online: await service.refreshOnline() })));

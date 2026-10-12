@@ -1,10 +1,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { parseJson, normalizeInterval, sanitizeName } = require('./utils.cjs');
+const { parseJson, normalizeInterval, sanitizeName, isPathInside } = require('./utils.cjs');
 const { CancelledError } = require('./task-manager.cjs');
 const { FileStore } = require('./file-store.cjs');
 const { writeAudioTags } = require('./tag-writer.cjs');
+const { buildSyncPlan } = require('./sync-plan.cjs');
 
 const MAX_TRACK_ATTEMPTS = 2;
 
@@ -112,13 +113,13 @@ class AppService {
     return cycle;
   }
 
-  bootstrap() {
+  bootstrap({ summary = false } = {}) {
     const settings = this.db.getSettings();
     return {
       settings: { ...settings, cookie: settings.cookie ? '••••••••' : '' },
       initialized: Boolean(settings.initialized),
       online: this.onlinePlaylists(),
-      local: this.localPlaylists(),
+      local: this.localPlaylists({ summary }),
       scanning: this.scanning,
       scanSource: this.scanSource,
       scanStatus: this.scanStatus,
@@ -136,32 +137,114 @@ class AppService {
     }));
   }
 
-  localPlaylists() {
-    return this.db.all('SELECT * FROM local_playlists ORDER BY added_at DESC').map((row) => this.mapLocal(row));
+  localPlaylists({ summary = false } = {}) {
+    if (this.localCache?.revision !== this.db.revision || this.localCache?.rootPath !== this.rootPath) {
+      const tracks = groupBy(this.db.all(`SELECT pt.playlist_id,pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
+        FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id`), 'playlist_id');
+      const choices = groupBy(this.db.all('SELECT * FROM track_choices'), 'playlist_id');
+      const rows = this.db.all('SELECT * FROM local_playlists ORDER BY added_at DESC');
+      const deleteRemoved = this.db.getSettings().deleteRemoved;
+      this.localCache = { revision: this.db.revision, rootPath: this.rootPath,
+        rows: rows.map((row) => this.mapLocal(row, tracks.get(row.id) || [], choices.get(row.id) || [], deleteRemoved)) };
+    }
+    if (!summary) return this.localCache.rows;
+    return this.localCache.rows.map(({ added, removed, existing, ...row }) => row);
   }
 
-  mapLocal(row) {
-    const added = parseJson(row.added_json, []);
-    const removed = parseJson(row.removed_json, []);
-    const removedIds = new Set(removed.map((track) => String(track.id)));
-    const existing = this.db.all(`SELECT pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
-      FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id WHERE pt.playlist_id=?`, [row.id])
-      .map(dbTrack).filter((track) => !removedIds.has(String(track.id)));
+  mapLocal(row, trackRows, choices, deleteRemoved) {
+    const { added, removed, existing, needsSync } = buildSyncPlan(row, trackRows.map(dbTrack), choices, deleteRemoved);
     let status = 'synced';
     if (row.paused) status = 'paused';
     else if (row.offline) status = 'offline';
-    else if (added.length || removed.length || row.pending_name || row.error) status = 'pending';
-    const displayName = sanitizeName(row.name) === row.folder_name ? row.name : `${row.name}（${row.folder_name}）`;
+    else if (needsSync || row.pending_name || row.error) status = 'pending';
+    const basename = path.basename(row.folder_name);
+    const displayName = sanitizeName(row.name) === basename ? row.name : `${row.name}（${basename}）`;
+    let folderPath;
+    let pathError = '';
+    try { folderPath = this.fileStore.playlistPath(row.folder_name); }
+    catch (error) { folderPath = path.resolve(this.rootPath, row.folder_name); pathError = error.message; status = 'offline'; }
+    const revision = crypto.createHash('sha256').update(JSON.stringify([row.online_id, row.folder_name, row.added_json, row.removed_json, trackRows, choices, deleteRemoved])).digest('hex');
     return {
       id: row.id, onlineId: row.online_id, name: row.name, folderName: row.folder_name,
       displayName,
-      folderPath: this.fileStore.playlistPath(row.folder_name), createdAt: row.created_at,
-      trackCount: row.track_count, paused: Boolean(row.paused), offline: Boolean(row.offline),
+      folderPath, createdAt: row.created_at,
+      trackCount: row.track_count, paused: Boolean(row.paused), offline: Boolean(row.offline || pathError),
       previousName: row.previous_name, pendingName: row.pending_name,
-      added, removed, existing,
+      added, removed, existing, addedCount: added.length, removedCount: removed.length, existingCount: existing.length,
+      needsSync, revision, customMapping: Boolean(row.custom_mapping),
       lastSyncAt: row.last_sync_at, lastScanAt: row.last_scan_at,
-      syncProgress: row.sync_progress, error: row.error, status
+      syncProgress: row.sync_progress, error: pathError || row.error, status
     };
+  }
+
+  localDetail(id) {
+    const item = this.localPlaylists().find((row) => row.id === id);
+    if (!item) throw new Error('本地歌单不存在');
+    return item;
+  }
+
+  assertEditable() {
+    if (this.tasks.active || this.scanning) throw new Error('请等待扫描或同步任务结束后再修改');
+  }
+
+  async saveTrackChoices(id, revision, changes) {
+    this.assertEditable();
+    const item = this.localDetail(id);
+    if (revision !== item.revision) throw new Error('歌单内容已改变，请重新打开详情后编辑');
+    if (!Array.isArray(changes)) throw new Error('歌曲方案格式不正确');
+    const knownIds = new Set([...item.added, ...item.removed, ...item.existing].map((track) => track.id));
+    for (const choice of changes) {
+      if (!choice || !knownIds.has(String(choice.id)) || !['add', 'remove', 'keep'].includes(choice.action)) throw new Error('歌曲或操作无效');
+    }
+    this.db.transaction(() => {
+      for (const choice of changes) this.db.db.run(`INSERT INTO track_choices(playlist_id,track_id,action) VALUES (?,?,?)
+        ON CONFLICT(playlist_id,track_id) DO UPDATE SET action=excluded.action`, [id, String(choice.id), choice.action]);
+    });
+    return this.localDetail(id);
+  }
+
+  validateMapping(folderName, exceptId = '') {
+    const target = this.fileStore.playlistPath(folderName);
+    for (const row of this.db.all('SELECT id,folder_name FROM local_playlists')) {
+      if (row.id === exceptId) continue;
+      const other = path.resolve(this.rootPath, row.folder_name);
+      if (pathsOverlap(target, other)) throw new Error('目标目录与其他歌单目录重复或互相嵌套，请选择独立文件夹');
+    }
+    return target;
+  }
+
+  async mapPlaylist(onlineId, folderPath, localId = '') {
+    this.assertEditable();
+    const mappingRoot = this.rootPath;
+    onlineId = String(onlineId || '');
+    const online = this.db.get('SELECT * FROM online_playlists WHERE id=?', [onlineId]);
+    if (!online) throw new Error('在线歌单不存在');
+    const row = localId ? this.db.get('SELECT * FROM local_playlists WHERE id=?', [localId]) : null;
+    if (localId && !row) throw new Error('本地歌单不存在');
+    if (this.db.get('SELECT id FROM local_playlists WHERE online_id=? AND id<>?', [onlineId, localId])) throw new Error('该在线歌单已有本地映射');
+    const folderName = this.fileStore.relativePlaylistPath(folderPath);
+    const target = this.validateMapping(folderName, localId);
+    if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) throw new Error('请选择已存在的本地文件夹');
+    const detail = await this.netease.getPlaylist(onlineId);
+    this.assertEditable();
+    if (this.rootPath !== mappingRoot) throw new Error('音乐库位置已改变，请重新选择映射目录');
+    const current = localId ? this.db.get('SELECT * FROM local_playlists WHERE id=?', [localId]) : null;
+    if (row && (!current || current.folder_name !== row.folder_name || current.online_id !== row.online_id)) throw new Error('映射已改变，请重新打开映射设置');
+    if (this.db.get('SELECT id FROM local_playlists WHERE online_id=? AND id<>?', [onlineId, localId])) throw new Error('该在线歌单已有本地映射');
+    this.validateMapping(folderName, localId);
+    if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) throw new Error('映射的本地文件夹不存在');
+    const id = row?.id || crypto.randomUUID();
+    this.db.transaction(() => {
+      if (row) {
+        if (row.folder_name !== folderName) this.db.db.run('DELETE FROM playlist_tracks WHERE playlist_id=?', [id]);
+        if (row.online_id !== onlineId) this.db.db.run('DELETE FROM track_choices WHERE playlist_id=?', [id]);
+        this.db.db.run(`UPDATE local_playlists SET online_id=?,name=?,folder_name=?,custom_mapping=1,pending_name=NULL,
+          created_at=?,offline=0,error=NULL WHERE id=?`, [onlineId, online.name, folderName, online.created_at, id]);
+      } else this.db.db.run(`INSERT INTO local_playlists(id,online_id,name,folder_name,custom_mapping,created_at,added_at)
+        VALUES (?,?,?,?,1,?,?)`, [id, onlineId, online.name, folderName, online.created_at, Date.now()]);
+    });
+    await this.adoptAndDiff(id, detail);
+    return this.localDetail(id);
   }
 
   async setupUser(userId, changing = false) {
@@ -209,6 +292,7 @@ class AppService {
     this.db.setSettings({ lastScanAt: Date.now() });
     try {
       await this.refreshOnline(false);
+      await this.discoverExistingPlaylistFolders({ onlyNew: true });
       return await this.scan(source, true);
     } finally {
       this.scanning = false;
@@ -239,6 +323,7 @@ class AppService {
     if (this.scanning) throw new Error('扫描进行中，暂时不能添加歌单');
     const unique = [...new Set((onlineIds || []).map(String))];
     const added = [];
+    const folders = indexFolders(await this.fileStore.listPlaylistFolders());
     for (const onlineId of unique) {
       if (this.db.get('SELECT id FROM local_playlists WHERE online_id=?', [onlineId])) continue;
       const online = this.db.get('SELECT * FROM online_playlists WHERE id=?', [onlineId]);
@@ -246,7 +331,11 @@ class AppService {
       const detail = await this.netease.getPlaylist(onlineId);
       const id = crypto.randomUUID();
       const rows = this.db.all('SELECT id,folder_name FROM local_playlists');
-      const folderName = this.fileStore.chooseFolderName(online.name, id, rows);
+      const sameNameCount = this.db.all('SELECT name FROM online_playlists').filter((item) => sanitizeName(item.name).toLowerCase() === sanitizeName(online.name).toLowerCase()).length;
+      const match = this.resolvePlaylistFolder(online, folders, rows, null, sameNameCount === 1);
+      if (match.ambiguous) throw new Error('存在多个同名文件夹，请使用自定义映射选择目录');
+      const folderName = match.folder || this.fileStore.chooseFolderName(online.name, id, rows);
+      this.validateMapping(folderName);
       this.fileStore.ensurePlaylistFolder(folderName);
       this.db.run(`INSERT INTO local_playlists(id,online_id,name,folder_name,created_at,track_count,added_at,added_json,removed_json,existing_json)
         VALUES (?,?,?,?,?,?,?,?,?,?)`, [id, onlineId, online.name, folderName, online.created_at, 0, Date.now(), '[]', '[]', '[]']);
@@ -260,11 +349,28 @@ class AppService {
     return { added, local: this.localPlaylists() };
   }
 
-  async discoverExistingPlaylistFolders() {
-    const folders = this.fileStore.listPlaylistFolders();
-    if (!folders.length) return { matched: 0, added: 0, ids: [] };
-    const available = new Map(folders.map((folder) => [folder.toLowerCase(), folder]));
-    const claimed = new Set();
+  resolvePlaylistFolder(online, folders, localRows, local, allowBase = true) {
+    const available = folders.byPath;
+    if (local?.folder_name && available.has(local.folder_name.toLowerCase())) return { folder: available.get(local.folder_name.toLowerCase()) };
+    if (local?.custom_mapping) return {};
+    const base = sanitizeName(online.name);
+    const names = [`${base} [${online.id}]`, ...(allowBase ? [base] : [])];
+    const groups = names.map((name) => (folders.byName.get(name.toLowerCase()) || [])
+      .filter((folder) => !localRows.some((row) => row.id !== local?.id && pathsOverlap(this.fileStore.playlistPath(folder), path.resolve(this.rootPath, row.folder_name)))));
+    for (const matches of groups) {
+      const direct = matches.find((folder) => path.dirname(folder) === '.');
+      if (direct) return { folder: direct };
+    }
+    for (const matches of groups) {
+      if (matches.length === 1) return { folder: matches[0] };
+      if (matches.length > 1) return { ambiguous: true };
+    }
+    return {};
+  }
+
+  async discoverExistingPlaylistFolders({ onlyNew = false } = {}) {
+    const folders = indexFolders(await this.fileStore.listPlaylistFolders());
+    if (!folders.byPath.size) return { matched: 0, added: 0, ids: [] };
     const onlineRows = this.db.all('SELECT * FROM online_playlists ORDER BY created_at DESC');
     const localRows = this.db.all('SELECT * FROM local_playlists');
     const localsByOnlineId = new Map(localRows.filter((row) => row.online_id).map((row) => [String(row.online_id), row]));
@@ -277,16 +383,10 @@ class AppService {
     for (const online of onlineRows) {
       const onlineId = String(online.id);
       const local = localsByOnlineId.get(onlineId);
+      if (onlyNew && local) continue;
       const baseName = sanitizeName(online.name);
-      const candidates = [];
-      if (local?.folder_name) candidates.push(local.folder_name);
-      candidates.push(`${baseName} [${onlineId}]`);
-      if (local || baseNameCounts.get(baseName.toLowerCase()) === 1) candidates.push(baseName);
-      const folderName = candidates
-        .map((candidate) => available.get(candidate.toLowerCase()))
-        .find((candidate) => candidate && !claimed.has(candidate.toLowerCase()));
+      const { folder: folderName } = this.resolvePlaylistFolder(online, folders, localRows, local, baseNameCounts.get(baseName.toLowerCase()) === 1);
       if (!folderName) continue;
-      claimed.add(folderName.toLowerCase());
       let localId = local?.id;
       if (local) {
         this.db.run(`UPDATE local_playlists SET name=?,folder_name=?,created_at=?,offline=0,error=NULL WHERE id=?`,
@@ -296,6 +396,7 @@ class AppService {
         this.db.run(`INSERT INTO local_playlists(id,online_id,name,folder_name,created_at,track_count,added_at,added_json,removed_json,existing_json)
           VALUES (?,?,?,?,?,?,?,?,?,?)`, [localId, onlineId, online.name, folderName, online.created_at, 0, Date.now(), '[]', '[]', '[]']);
         localsByOnlineId.set(onlineId, { id: localId, online_id: onlineId, folder_name: folderName });
+        localRows.push({ id: localId, online_id: onlineId, folder_name: folderName });
         result.added += 1;
       }
       try {
@@ -314,22 +415,29 @@ class AppService {
     const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [localId]);
     const knownRows = this.db.all(`SELECT pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
       FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id WHERE pt.playlist_id=?`, [localId]);
-    const known = new Set(knownRows.map((item) => item.track_id));
+    const missing = knownRows.filter((item) => !fs.existsSync(path.join(this.fileStore.playlistPath(row.folder_name), item.filename)));
+    if (missing.length) this.db.transaction(() => {
+      for (const item of missing) this.db.db.run('DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?', [localId, item.track_id]);
+    });
+    const missingIds = new Set(missing.map((item) => item.track_id));
+    const known = new Set(knownRows.filter((item) => !missingIds.has(item.track_id)).map((item) => item.track_id));
     const files = this.fileStore.listAudioFiles(row.folder_name);
-    const claimed = new Set(knownRows.map((item) => path.join(this.fileStore.playlistPath(row.folder_name), item.filename)));
+    const claimed = new Set(knownRows.filter((item) => !missingIds.has(item.track_id)).map((item) => path.join(this.fileStore.playlistPath(row.folder_name), item.filename)));
+    const adoptedTracks = [];
     for (const track of detail.tracks) {
       if (known.has(track.id)) continue;
       const match = this.fileStore.findLegacyMatch(track, files, claimed);
       if (!match) continue;
       const adopted = await this.fileStore.adoptLegacyFile(track, match);
-      this.db.transaction(() => {
-        this.db.db.run(`INSERT OR IGNORE INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,created_at)
-          VALUES (?,?,?,?,?,?,?,?,?)`, [track.id, track.name, JSON.stringify(track.artists), track.album, track.duration, adopted.entityPath, adopted.extension, adopted.size, Date.now()]);
-        this.db.db.run('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,filename,linked_at) VALUES (?,?,?,?)', [localId, track.id, adopted.filename, Date.now()]);
-      });
+      adoptedTracks.push({ track, adopted });
       known.add(track.id);
     }
     this.db.transaction(() => {
+      for (const { track, adopted } of adoptedTracks) {
+        this.db.db.run(`INSERT OR IGNORE INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?)`, [track.id, track.name, JSON.stringify(track.artists), track.album, track.duration, adopted.entityPath, adopted.extension, adopted.size, Date.now()]);
+        this.db.db.run('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,filename,linked_at) VALUES (?,?,?,?)', [localId, track.id, adopted.filename, Date.now()]);
+      }
       for (const track of detail.tracks) {
         if (!track.coverUrl) continue;
         this.db.db.run('UPDATE songs SET cover_url=? WHERE track_id=? AND cover_url=?', [track.coverUrl, track.id, '']);
@@ -338,14 +446,15 @@ class AppService {
     const remoteIds = new Set(detail.tracks.map((item) => item.id));
     const current = this.db.all(`SELECT pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
       FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id WHERE pt.playlist_id=?`, [localId]);
-    const added = detail.tracks.filter((item) => !current.some((knownTrack) => knownTrack.track_id === item.id));
+    const currentIds = new Set(current.map((item) => item.track_id));
+    const added = detail.tracks.filter((item) => !currentIds.has(item.id));
     const removed = current.filter((item) => !remoteIds.has(item.track_id)).map(dbTrack);
     const existing = current.filter((item) => remoteIds.has(item.track_id)).map(dbTrack);
     const nameChanged = row.name !== detail.name;
     let folderName = row.folder_name;
     const targetFolderName = sanitizeName(detail.name);
-    let pendingName = folderName === targetFolderName ? null : detail.name;
-    if (folderName !== targetFolderName && this.db.getSettings().renamePolicy === 'auto') {
+    let pendingName = row.custom_mapping || path.basename(folderName) === targetFolderName ? null : detail.name;
+    if (pendingName && this.db.getSettings().renamePolicy === 'auto') {
       try {
         folderName = await this.fileStore.renamePlaylistFolder(row.folder_name, detail.name);
         pendingName = null;
@@ -373,11 +482,16 @@ class AppService {
       const rows = this.db.all('SELECT * FROM local_playlists WHERE paused=0');
       const onlineIds = new Set(this.onlinePlaylists().map((item) => item.id));
       const managedFolders = this.db.all('SELECT folder_name FROM local_playlists').map((item) => item.folder_name);
+      let folders;
       for (const row of rows) {
-        if (!fs.existsSync(this.fileStore.playlistPath(row.folder_name))) {
+        let folderPath;
+        try { folderPath = this.fileStore.playlistPath(row.folder_name); }
+        catch (error) { this.db.run('UPDATE local_playlists SET offline=1,error=? WHERE id=?', [error.message, row.id]); continue; }
+        if (!fs.existsSync(folderPath)) {
           const filenames = this.db.all('SELECT filename FROM playlist_tracks WHERE playlist_id=?', [row.id]).map((item) => item.filename);
-          const moved = this.fileStore.detectMovedFolder(row.folder_name, filenames, managedFolders);
-          if (moved) this.db.run('UPDATE local_playlists SET name=?,folder_name=?,previous_name=?,pending_name=NULL,offline=1,error=? WHERE id=?', [moved, moved, row.name, '检测到本地文件夹已重命名，请重定向后恢复同步', row.id]);
+          folders ||= await this.fileStore.listPlaylistFolders();
+          const moved = await this.fileStore.detectMovedFolder(row.folder_name, filenames, managedFolders, folders);
+          if (moved) this.db.run('UPDATE local_playlists SET name=?,folder_name=?,previous_name=?,pending_name=NULL,offline=1,error=? WHERE id=?', [path.basename(moved), moved, row.name, '检测到本地文件夹已重命名，请重定向后恢复同步', row.id]);
           else this.db.run('UPDATE local_playlists SET offline=1,error=? WHERE id=?', ['本地歌单文件夹不存在', row.id]);
           continue;
         }
@@ -387,8 +501,8 @@ class AppService {
         }
         try {
           const detail = await this.netease.getPlaylist(row.online_id);
-          const diff = await this.adoptAndDiff(row.id, detail);
-          if (diff.added.length || diff.removed.length || row.name !== detail.name) unsynced += 1;
+          await this.adoptAndDiff(row.id, detail);
+          if (this.localDetail(row.id).needsSync || row.name !== detail.name) unsynced += 1;
         } catch (error) {
           this.db.run('UPDATE local_playlists SET offline=1,error=? WHERE id=?', [error.message, row.id]);
         }
@@ -407,11 +521,12 @@ class AppService {
 
   startSync(ids, source = 'manual') {
     if (this.scanning) throw new Error('扫描进行中，暂时不能同步');
-    const selected = ids?.length ? new Set(ids.map(String)) : null;
-    const settings = this.db.getSettings();
+    if (ids !== undefined && !Array.isArray(ids)) throw new Error('歌单选择格式不正确');
+    const selected = ids === undefined ? null : new Set(ids.map(String));
     const rows = this.db.all('SELECT * FROM local_playlists WHERE paused=0 AND offline=0')
       .filter((row) => !selected || selected.has(row.id))
-      .filter((row) => source === 'manual' || parseJson(row.added_json, []).length || (settings.deleteRemoved && parseJson(row.removed_json, []).length));
+      .filter((row) => this.isSyncable(row))
+      .filter((row) => source === 'manual' || this.localDetail(row.id).needsSync);
     if (!rows.length) {
       if (source !== 'manual') return this.tasks.getState();
       throw new Error('没有可同步的歌单');
@@ -422,6 +537,19 @@ class AppService {
     return this.tasks.getState();
   }
 
+  isSyncable(row) {
+    try {
+      if (!row.online_id || !this.db.get('SELECT id FROM online_playlists WHERE id=?', [row.online_id])) throw new Error('在线歌单未匹配或不可访问');
+      if (this.db.get('SELECT id FROM local_playlists WHERE online_id=? AND id<>?', [row.online_id, row.id])) throw new Error('在线歌单存在重复映射');
+      const target = this.validateMapping(row.folder_name, row.id);
+      if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) throw new Error('映射的本地文件夹不存在');
+      return true;
+    } catch (error) {
+      this.db.run('UPDATE local_playlists SET offline=1,error=? WHERE id=?', [error.message, row.id]);
+      return false;
+    }
+  }
+
   async runSync(rows, control) {
     let finalError = '';
     const allFailures = [];
@@ -430,13 +558,12 @@ class AppService {
         control.throwIfCancelled();
         await control.waitIfPaused();
         const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [rows[index].id]);
-        if (!row || row.paused || row.offline) continue;
-        let added = parseJson(row.added_json, []);
+        if (!row || row.paused || row.offline || !this.isSyncable(row)) continue;
         if (!row.last_scan_at) {
           const detail = await this.netease.getPlaylist(row.online_id);
           await this.adoptAndDiff(row.id, detail);
-          added = parseJson(this.db.get('SELECT added_json FROM local_playlists WHERE id=?', [row.id]).added_json, []);
         }
+        const added = this.localDetail(row.id).added.filter((track) => !track.local);
         this.tasks.update({ current: index + 1, playlistId: row.id, downloaded: 0, downloadTotal: added.length, error: '' });
         if (added.length) this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：0/${added.length}`, row.id]);
         const failures = await this.syncTracksConcurrently(row, added, control);
@@ -444,12 +571,18 @@ class AppService {
         await this.ensureTrackCovers(row, control);
         allFailures.push(...failures);
         const latest = this.db.get('SELECT * FROM local_playlists WHERE id=?', [row.id]);
-        const remainingRemoved = this.db.getSettings().deleteRemoved ? [] : parseJson(latest.removed_json, []);
         const currentTracks = this.db.all(`SELECT pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
           FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id WHERE pt.playlist_id=?`, [row.id]).map(dbTrack);
-        this.db.run(`UPDATE local_playlists SET added_json=?,removed_json=?,existing_json=?,track_count=?,last_sync_at=?,sync_progress=NULL,error=NULL WHERE id=?`, [
-          JSON.stringify(failures.map((item) => item.track)), JSON.stringify(remainingRemoved), JSON.stringify(currentTracks), currentTracks.length, Date.now(), row.id
-        ]);
+        const currentIds = new Set(currentTracks.map((track) => track.id));
+        const remainingAdded = parseJson(latest.added_json, []).filter((track) => !currentIds.has(String(track.id)));
+        const remainingRemoved = parseJson(latest.removed_json, []).filter((track) => currentIds.has(String(track.id)));
+        this.db.transaction(() => {
+          this.db.db.run(`UPDATE local_playlists SET added_json=?,removed_json=?,existing_json=?,track_count=?,last_sync_at=?,sync_progress=NULL,error=NULL WHERE id=?`, [
+            JSON.stringify(remainingAdded), JSON.stringify(remainingRemoved), JSON.stringify(currentTracks), currentTracks.length, Date.now(), row.id
+          ]);
+          this.db.db.run(`UPDATE track_choices SET action='keep' WHERE playlist_id=? AND action='add'
+            AND track_id IN (SELECT track_id FROM playlist_tracks WHERE playlist_id=?)`, [row.id, row.id]);
+        });
       }
       finalError = '';
       this.db.setSettings({ interruptedTask: false, lastSyncAt: Date.now() });
@@ -615,11 +748,8 @@ class AppService {
   }
 
   async applyRemovals(row) {
-    const settings = this.db.getSettings();
-    if (!settings.deleteRemoved) return;
-    const latest = this.db.get('SELECT * FROM local_playlists WHERE id=?', [row.id]);
     const removedTrackIds = [];
-    for (const track of parseJson(latest.removed_json, [])) {
+    for (const track of this.localDetail(row.id).removed.filter((track) => track.local)) {
       const link = this.db.get('SELECT filename FROM playlist_tracks WHERE playlist_id=? AND track_id=?', [row.id, track.id]);
       if (link) await this.fileStore.removePlaylistLink(row.folder_name, link.filename);
       this.db.run('DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?', [row.id, track.id]);
@@ -655,6 +785,7 @@ class AppService {
   }
 
   async removeLocal(ids) {
+    this.assertEditable();
     const removedTrackIds = [];
     for (const id of ids || []) {
       const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [id]);
@@ -669,6 +800,7 @@ class AppService {
   }
 
   async redirectLocal(id, onlineId) {
+    this.assertEditable();
     const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [id]);
     const online = this.db.get('SELECT * FROM online_playlists WHERE id=?', [String(onlineId)]);
     if (!row || !online) throw new Error('歌单不存在');
@@ -677,15 +809,17 @@ class AppService {
     const pendingName = row.folder_name === sanitizeName(online.name) ? null : online.name;
     this.db.run('UPDATE local_playlists SET online_id=?,name=?,previous_name=?,pending_name=?,offline=0,error=NULL WHERE id=?', [String(onlineId), online.name, row.name, pendingName, id]);
     const detail = await this.netease.getPlaylist(onlineId);
+    this.db.run('DELETE FROM track_choices WHERE playlist_id=?', [id]);
     await this.adoptAndDiff(id, detail);
     return this.localPlaylists();
   }
 
   async syncFolderName(id) {
+    this.assertEditable();
     const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [id]);
     if (!row) throw new Error('歌单不存在');
     const newName = await this.fileStore.renamePlaylistFolder(row.folder_name, row.name);
-    this.db.run('UPDATE local_playlists SET folder_name=?,previous_name=NULL,pending_name=NULL WHERE id=?', [newName, id]);
+    this.db.run('UPDATE local_playlists SET folder_name=?,custom_mapping=0,previous_name=NULL,pending_name=NULL WHERE id=?', [newName, id]);
     return this.localPlaylists();
   }
 
@@ -791,6 +925,30 @@ class AppService {
 
 function dbTrack(row) {
   return { id: row.track_id, name: row.name, artists: parseJson(row.artists, []), album: row.album, duration: row.duration };
+}
+
+function groupBy(rows, key) {
+  const groups = new Map();
+  for (const row of rows) {
+    if (!groups.has(row[key])) groups.set(row[key], []);
+    groups.get(row[key]).push(row);
+  }
+  return groups;
+}
+
+function indexFolders(folders) {
+  const byPath = new Map(folders.map((folder) => [folder.toLowerCase(), folder]));
+  const byName = new Map();
+  for (const folder of folders) {
+    const name = path.basename(folder).toLowerCase();
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push(folder);
+  }
+  return { byPath, byName };
+}
+
+function pathsOverlap(left, right) {
+  return isPathInside(left, right) || isPathInside(right, left);
 }
 
 function flattenArtists(artist) {
