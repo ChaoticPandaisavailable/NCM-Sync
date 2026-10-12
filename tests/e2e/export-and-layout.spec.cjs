@@ -32,7 +32,8 @@ test('MP3 设置保存四种码率，超大歌单双栏分页和批量选择保�
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1080, 680));
     await page.locator('.local-pane tbody tr').dblclick();
     const online = page.getByTestId('songs-online'); const local = page.getByTestId('songs-local');
-    await expect(online.locator('.comparison-song-row')).toHaveCount(100);
+    await expect(online.locator('.comparison-song-row').first()).toContainText('Large Track 1');
+    expect(await online.locator('.comparison-song-row').count()).toBeLessThan(40);
     await expect(local.locator('.comparison-song-row')).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: '在线歌曲分页' })).toContainText('1 / 49 · 4867 首');
     await expect.poll(() => online.locator('.comparison-song-row').first().evaluate((row) => Math.round(row.getBoundingClientRect().height))).toBe(32);

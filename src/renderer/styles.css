@@ -394,3 +394,15 @@ tbody tr.sync-selected { background: rgba(225, 79, 105, .035); }
 .comparison-status small { display: block; font-size: 10px; color: #b6a085; }
 .comparison-list-frame .track-pagination { min-height: 34px; padding: 4px 10px; }
 @media (max-width: 1180px) { .comparison-toolbar { gap: 8px; } .comparison-search { width: 150px; } .comparison-list-labels, .comparison-song-row { gap: 5px; padding: 0 8px; } }
+
+/* Bound repainting and avoid a full-window software blur while lists move. */
+.modal-backdrop, .context-menu { backdrop-filter: none; }
+.modal-backdrop { background: rgba(3, 7, 13, .84); }
+.modal-backdrop:has(.comparison-editor), .dialog:has(.comparison-editor) { animation: none; }
+.comparison-song-list, .track-list, .table-wrap { contain: layout paint; overflow-anchor: none; }
+.comparison-song-row { cursor: pointer; }
+.online-pane tbody tr:not(.virtual-spacer) td { height: 60px; padding-top: 8px; padding-bottom: 8px; }
+.table-wrap .virtual-spacer, .table-wrap .virtual-spacer td { padding: 0; border: 0; box-shadow: none; background: transparent; pointer-events: none; }
+.track-list > div[data-track-id] { height: 42px; min-height: 42px; }
+.track-list > div.virtual-spacer, .comparison-song-list > .virtual-spacer { display: block; min-height: 0; padding: 0; border: 0; flex: none; pointer-events: none; }
+.local-pane tbody tr { content-visibility: auto; contain-intrinsic-size: auto 86px; }

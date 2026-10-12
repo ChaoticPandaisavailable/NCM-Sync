@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { api } from './api.js';
 import { sortRows } from './sorting.mjs';
 import { PlaylistEditor, MappingModal } from './playlist-editor.jsx';
+import { useVirtualWindow } from './use-virtual-window.jsx';
+import { reconcileSnapshot } from './snapshot.mjs';
 import './styles.css';
 import logoUrl from '../../assets/ncmsync-logo-256.png';
 
@@ -32,22 +34,44 @@ function App() {
   const onlineAnchor = useRef(null);
   const localAnchor = useRef(null);
   const pendingScope = useRef(null);
+  const inFlight = useRef(null);
+  const toastTimer = useRef(null);
 
-  const load = useCallback(async (quiet = false) => {
+  const load = useCallback(async (quiet = false, fresh = false) => {
+    if (inFlight.current) {
+      if (!fresh) return inFlight.current;
+      await inFlight.current;
+    }
+    const reading = (async () => {
     try {
       const next = await api.bootstrap();
-      setData(pendingScope.current ? { ...next, settings: { ...next.settings, syncPlaylistIds: pendingScope.current } } : next);
+      const scoped = pendingScope.current ? { ...next, settings: { ...next.settings, syncPlaylistIds: pendingScope.current } } : next;
+      setData((old) => reconcileSnapshot(old, scoped));
       if (!quiet && !next.initialized) setModal({ type: 'setup' });
     } catch (error) { notify(error.message, 'error'); }
     finally { setLoading(false); }
+    })();
+    inFlight.current = reading;
+    try { return await reading; }
+    finally { if (inFlight.current === reading) inFlight.current = null; }
   }, []);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     if (!data) return undefined;
-    const delay = data.task.active || data.scanning || data.settings.realtimeSync ? 500 : 1_200;
-    const timer = setInterval(() => load(true), delay);
-    return () => clearInterval(timer);
+    const delay = data.task.active || data.scanning ? 500 : data.settings.realtimeSync ? 1_200 : 2_500;
+    let timer; let stopped = false; let running = false;
+    const poll = async () => {
+      if (running || stopped) return;
+      running = true;
+      if (!document.hidden) await load(true);
+      running = false;
+      if (!stopped) timer = setTimeout(poll, document.hidden ? 10_000 : delay);
+    };
+    const visible = () => { if (!document.hidden) { clearTimeout(timer); poll(); } };
+    timer = setTimeout(poll, delay);
+    document.addEventListener('visibilitychange', visible);
+    return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', visible); };
   }, [data?.task.active, data?.scanning, data?.settings.realtimeSync, load]);
   useEffect(() => {
     const close = () => setContext(null);
@@ -56,15 +80,16 @@ function App() {
   }, []);
 
   function notify(message, type = 'success') {
+    clearTimeout(toastTimer.current);
     setToast({ message, type });
-    setTimeout(() => setToast(null), 3800);
+    toastTimer.current = setTimeout(() => setToast(null), 3800);
   }
 
   async function action(name, fn, success) {
     setBusy(name);
     try {
       const result = await fn();
-      await load(true);
+      await load(true, true);
       if (success) notify(typeof success === 'function' ? success(result) : success);
       return result;
     } catch (error) { notify(error.message, 'error'); return null; }
@@ -74,17 +99,19 @@ function App() {
   const onlineCounts = useMemo(() => ({
     created: (data?.online || []).filter((item) => item.kind === 'created').length,
     saved: (data?.online || []).filter((item) => item.kind === 'saved').length
-  }), [data]);
+  }), [data?.online]);
   const syncScope = useMemo(() => new Set(data?.settings.syncPlaylistIds || []), [data?.settings.syncPlaylistIds]);
   const onlineSelectedCounts = useMemo(() => ({
     created: (data?.online || []).filter((item) => item.kind === 'created' && syncScope.has(item.id)).length,
     saved: (data?.online || []).filter((item) => item.kind === 'saved' && syncScope.has(item.id)).length
-  }), [data, syncScope]);
+  }), [data?.online, syncScope]);
   const onlineRows = useMemo(() => sortRows((data?.online || [])
     .filter((item) => item.kind === onlineTab)
-    .filter((item) => item.name.toLowerCase().includes(onlineSearch.toLowerCase())), onlineSort), [data, onlineTab, onlineSearch, onlineSort]);
+    .filter((item) => item.name.toLowerCase().includes(onlineSearch.toLowerCase())), onlineSort), [data?.online, onlineTab, onlineSearch, onlineSort]);
   const localRows = useMemo(() => sortRows((data?.local || [])
-    .filter((item) => `${item.displayName} ${item.folderPath}`.toLowerCase().includes(localSearch.toLowerCase())), localSort), [data, localSearch, localSort]);
+    .filter((item) => `${item.displayName} ${item.folderPath}`.toLowerCase().includes(localSearch.toLowerCase())), localSort), [data?.local, localSearch, localSort]);
+  const mappedOnlineIds = useMemo(() => new Set((data?.local || []).filter((row) => !row.offline).map((row) => row.onlineId)), [data?.local]);
+  const onlineWindow = useVirtualWindow(onlineRows.length, 60, `${onlineTab}:${onlineSearch}:${onlineSort.key}:${onlineSort.direction}`, 36);
 
   function toggleSelection(event, item, rows, selected, setSelected, anchorRef) {
     const next = new Set(event.ctrlKey ? selected : []);
@@ -210,18 +237,20 @@ function App() {
           <button disabled={selectionBlocked || !onlineRows.length} onClick={() => choosePlaylists(onlineRows.map((row) => row.id), !allVisibleSelected)}>{allVisibleSelected ? '取消全选' : '全选当前列表'}</button>
           <button disabled={selectionBlocked || !syncScope.size} onClick={() => choosePlaylists([...syncScope], false)}>清空选择</button>
         </div></div>
-        <div className="table-wrap" tabIndex="0" onKeyDown={(event) => { if (event.ctrlKey && event.key.toLowerCase() === 'a') { event.preventDefault(); if (!selectionBlocked) choosePlaylists(onlineRows.map((row) => row.id), true); } }}>
+        <div ref={onlineWindow.viewport} className="table-wrap" tabIndex="0" onKeyDown={(event) => { if (event.ctrlKey && event.key.toLowerCase() === 'a') { event.preventDefault(); if (!selectionBlocked) choosePlaylists(onlineRows.map((row) => row.id), true); } }}>
           <table><thead><tr>
             <th className="check-col"><input className="selection-checkbox" aria-label="选择当前列表的全部歌单" type="checkbox" checked={allVisibleSelected} disabled={selectionBlocked || !onlineRows.length} onChange={(event) => choosePlaylists(onlineRows.map((row) => row.id), event.target.checked)} /></th>
             <Sortable label="名称" sort={onlineSort} field="name" setSort={setOnlineSort} />
             <Sortable label="歌曲数" sort={onlineSort} field="trackCount" setSort={setOnlineSort} />
             <Sortable label="创建日期" sort={onlineSort} field="createdAt" setSort={setOnlineSort} />
           </tr></thead><tbody>
-            {onlineRows.map((item) => <tr key={item.id} className={`${onlineSelected.has(item.id) ? 'selected' : ''} ${syncScope.has(item.id) ? 'sync-selected' : ''}`}
+            {onlineWindow.top > 0 && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={4} style={{ height: onlineWindow.top }} /></tr>}
+            {onlineRows.slice(onlineWindow.start, onlineWindow.end).map((item) => <tr key={item.id} data-playlist-id={item.id} className={`${onlineSelected.has(item.id) ? 'selected' : ''} ${syncScope.has(item.id) ? 'sync-selected' : ''}`}
               onClick={(event) => toggleSelection(event, item, onlineRows, onlineSelected, setOnlineSelected, onlineAnchor)} onDoubleClick={() => showOnlineDetail(item)}>
               <td className="check-col" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}><input className="selection-checkbox" aria-label={`同步歌单：${item.name}`} type="checkbox" checked={syncScope.has(item.id)} disabled={selectionBlocked} onChange={(event) => { setOnlineSelected(new Set([item.id])); choosePlaylists([item.id], event.target.checked); }} /></td>
-              <td><div className="name-cell"><span>{item.name}</span><small className={data.local.some((row) => row.onlineId === item.id && !row.offline) ? 'mapped-label' : 'unmapped-label'}>{data.local.some((row) => row.onlineId === item.id && !row.offline) ? '已映射' : '待匹配目录'}</small></div></td><td>{item.trackCount}</td><td>{date(item.createdAt)}</td>
+              <td><div className="name-cell"><span>{item.name}</span><small className={mappedOnlineIds.has(item.id) ? 'mapped-label' : 'unmapped-label'}>{mappedOnlineIds.has(item.id) ? '已映射' : '待匹配目录'}</small></div></td><td>{item.trackCount}</td><td>{date(item.createdAt)}</td>
             </tr>)}
+            {onlineWindow.bottom > 0 && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={4} style={{ height: onlineWindow.bottom }} /></tr>}
             {!onlineRows.length && <EmptyRow columns={4} text={data.settings.userId ? '没有匹配的在线歌单' : '请先在设置中填写用户 ID'} />}
           </tbody></table>
         </div>
@@ -444,8 +473,14 @@ function TrackList({ tracks, empty = '暂无歌曲', compact = false }) {
   const safePage = Math.min(page, pageCount - 1);
   useEffect(() => setPage(0), [tracks.length, tracks[0]?.id]);
   const start = safePage * pageSize;
-  const visible = tracks.slice(start, start + pageSize);
-  return <div className="track-list-frame"><div className={`track-list ${compact ? 'compact' : ''}`}>{tracks.length ? visible.map((track, index) => <div key={track.id}><span>{String(start + index + 1).padStart(2, '0')}</span><strong>{track.name || `歌曲 ${track.id}`}</strong><em>{(track.artists || []).join(', ') || '未知艺术家'}</em><small>{duration(track.duration)}</small></div>) : <p className="empty-state">{empty}</p>}</div>{pageCount > 1 && <nav className="track-pagination" aria-label="曲目分页"><button disabled={safePage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>上一页</button><span>{safePage + 1} / {pageCount} · {tracks.length} 首</span><button disabled={safePage >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>下一页</button></nav>}</div>;
+  const pageTracks = tracks.slice(start, start + pageSize);
+  const window = useVirtualWindow(pageTracks.length, 42, `${safePage}:${tracks[0]?.id}`);
+  const visible = pageTracks.slice(window.start, window.end);
+  return <div className="track-list-frame"><div ref={window.viewport} className={`track-list ${compact ? 'compact' : ''}`}>
+    {window.top > 0 && <div className="virtual-spacer" aria-hidden="true" style={{ height: window.top }} />}
+    {tracks.length ? visible.map((track, index) => <div key={track.id} data-track-id={track.id}><span>{String(start + window.start + index + 1).padStart(2, '0')}</span><strong>{track.name || `歌曲 ${track.id}`}</strong><em>{(track.artists || []).join(', ') || '未知艺术家'}</em><small>{duration(track.duration)}</small></div>) : <p className="empty-state">{empty}</p>}
+    {window.bottom > 0 && <div className="virtual-spacer" aria-hidden="true" style={{ height: window.bottom }} />}
+  </div>{pageCount > 1 && <nav className="track-pagination" aria-label="曲目分页"><button disabled={safePage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>上一页</button><span>{safePage + 1} / {pageCount} · {tracks.length} 首</span><button disabled={safePage >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>下一页</button></nav>}</div>;
 }
 function TracksModal({ title, tracks, close }) { return <Dialog title={title} subtitle={`${tracks.length} 首歌曲`} close={close} wide><TrackList tracks={tracks} /></Dialog>; }
 function ConfirmDialog({ title, message, confirmText, dangerous, showDontAsk, onConfirm, busy, close }) { const [dontAsk, setDontAsk] = useState(false); return <Dialog title={title} close={close}><div className="confirm-content"><div className={dangerous ? 'warning-icon' : 'info-icon'}>!</div><p>{message}</p></div>{showDontAsk && <label className="delete-check"><input type="checkbox" checked={dontAsk} onChange={(event) => setDontAsk(event.target.checked)} /> 下次不再询问</label>}<div className="modal-actions"><button onClick={close}>取消</button><button className={dangerous ? 'danger-button' : 'primary'} disabled={busy} onClick={() => onConfirm(dontAsk)}>{confirmText || '确认'}</button></div></Dialog>; }

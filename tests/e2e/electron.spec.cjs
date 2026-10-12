@@ -138,11 +138,12 @@ test('NCM Sync 首次设置、扫描、排序、同步和安全删除完整桌�
     }
     await page.getByText('超大歌单测试', { exact: true }).dblclick();
     await expect(page.getByRole('navigation', { name: '曲目分页' })).toContainText('1 / 25 · 4867 首');
-    await expect(page.locator('.dialog .track-list > div')).toHaveCount(200);
+    await expect(page.locator('.dialog .track-list > div[data-track-id]').first()).toContainText('Large Track 1');
+    expect(await page.locator('.dialog .track-list > div[data-track-id]').count()).toBeLessThan(40);
     fs.mkdirSync(path.join(projectRoot, 'test-results'), { recursive: true });
     await page.screenshot({ path: path.join(projectRoot, 'test-results', 'ncmsync-large-playlist-e2e.png'), fullPage: true });
     await page.getByRole('button', { name: '下一页' }).click();
-    await expect(page.locator('.dialog .track-list > div').first()).toContainText('Large Track 201');
+    await expect(page.locator('.dialog .track-list > div[data-track-id]').first()).toContainText('Large Track 201');
     await page.getByRole('button', { name: '关闭' }).click();
     await page.getByRole('button', { name: '设置' }).click();
     await page.getByTestId('acquire-account').click();

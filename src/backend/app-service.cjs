@@ -114,6 +114,10 @@ class AppService {
     return cycle;
   }
 
+  bootstrapRevision() {
+    return JSON.stringify([this.db.revision, this.rootPath, this.scanning, this.scanSource, this.scanStatus, this.tasks.getState()]);
+  }
+
   bootstrap({ summary = false } = {}) {
     const settings = this.db.getSettings();
     return {
@@ -145,8 +149,18 @@ class AppService {
       const choices = groupBy(this.db.all('SELECT * FROM track_choices'), 'playlist_id');
       const rows = this.db.all('SELECT * FROM local_playlists ORDER BY added_at DESC');
       const deleteRemoved = this.db.getSettings().deleteRemoved;
-      this.localCache = { revision: this.db.revision, rootPath: this.rootPath,
-        rows: rows.map((row) => this.mapLocal(row, tracks.get(row.id) || [], choices.get(row.id) || [], deleteRemoved)) };
+      const previous = this.localCache?.rootPath === this.rootPath ? this.localCache.entries : null;
+      const entries = new Map();
+      const mapped = rows.map((row) => {
+        const trackRows = tracks.get(row.id) || []; const decisions = choices.get(row.id) || [];
+        const old = previous?.get(row.id);
+        const unchanged = old && old.deleteRemoved === deleteRemoved && sameSqlRows([old.row], [row])
+          && sameSqlRows(old.tracks, trackRows) && sameSqlRows(old.choices, decisions);
+        const item = unchanged ? old.item : this.mapLocal(row, trackRows, decisions, deleteRemoved);
+        entries.set(row.id, { row, tracks: trackRows, choices: decisions, deleteRemoved, item });
+        return item;
+      });
+      this.localCache = { revision: this.db.revision, rootPath: this.rootPath, entries, rows: mapped };
     }
     if (!summary) return this.localCache.rows;
     return this.localCache.rows.map(({ added, removed, existing, onlineTracks, localTracks, ...row }) => row);
@@ -223,9 +237,12 @@ class AppService {
       if (Object.hasOwn(choice, 'enabled') && typeof choice.enabled !== 'boolean') throw new Error('歌曲勾选格式不正确');
     }
     this.db.transaction(() => {
-      for (const choice of changes) this.db.db.run(`INSERT INTO track_choices(playlist_id,track_id,action,enabled) VALUES (?,?,?,?)
-        ON CONFLICT(playlist_id,track_id) DO UPDATE SET action=excluded.action,enabled=excluded.enabled`,
-      [id, String(choice.id), choice.action, (choice.enabled ?? (choice.action === 'add' || knownTracks.get(String(choice.id)).local)) ? 1 : 0]);
+      const statement = this.db.db.prepare(`INSERT INTO track_choices(playlist_id,track_id,action,enabled) VALUES (?,?,?,?)
+        ON CONFLICT(playlist_id,track_id) DO UPDATE SET action=excluded.action,enabled=excluded.enabled`);
+      try {
+        for (const choice of changes) statement.run([id, String(choice.id), choice.action,
+          (choice.enabled ?? (choice.action === 'add' || knownTracks.get(String(choice.id)).local)) ? 1 : 0]);
+      } finally { statement.free(); }
     });
     return this.localDetail(id);
   }
@@ -634,7 +651,7 @@ class AppService {
         }
         const added = this.localDetail(row.id).added.filter((track) => track.syncSelected && !track.local);
         this.tasks.update({ current: index + 1, playlistId: row.id, downloaded: 0, downloadTotal: added.length, error: '' });
-        if (added.length) this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：0/${added.length}`, row.id]);
+        if (added.length) this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：0/${added.length}`, row.id], false);
         const failures = await this.syncTracksConcurrently(row, added, control);
         await this.applyRemovals(row);
         await this.ensureTrackCovers(row, control);
@@ -702,7 +719,7 @@ class AppService {
               await this.syncTrack(row, track, control);
               completed += 1;
               this.tasks.update({ downloaded: completed, error: '' });
-              this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：${completed}/${tracks.length}`, row.id]);
+              this.db.run('UPDATE local_playlists SET sync_progress=?,error=NULL WHERE id=?', [`正在同步：${completed}/${tracks.length}`, row.id], false);
               lastError = null;
               break;
             } catch (error) {
@@ -786,6 +803,7 @@ class AppService {
   async syncTrack(row, track, control) {
     let song = this.db.get('SELECT * FROM songs WHERE track_id=?', [track.id]);
     let downloaded;
+    let songValues;
     let needsCover = false;
     if (!song || !fs.existsSync(song.entity_path) || fs.statSync(song.entity_path).size === 0) {
       const response = await this.netease.getAudioResponse(track.id, control.signal);
@@ -796,19 +814,25 @@ class AppService {
       downloaded = await exportMp3(downloaded, control.mp3Bitrate ?? this.db.getSettings().mp3Bitrate, control);
       const coverEmbedded = await this.writeTrackTags(downloaded.entityPath, downloaded.extension, track, { ...downloaded, cover: downloaded.cover || null });
       downloaded.size = fs.statSync(downloaded.entityPath).size;
-      this.db.run(`INSERT INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,cover_url,cover_embedded,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(track_id) DO UPDATE SET name=excluded.name,artists=excluded.artists,album=excluded.album,
-        duration=excluded.duration,entity_path=excluded.entity_path,extension=excluded.extension,size=excluded.size,
-        cover_url=excluded.cover_url,cover_embedded=excluded.cover_embedded`, [
+      songValues = [
         track.id, track.name, JSON.stringify(track.artists), track.album, track.duration, downloaded.entityPath,
         downloaded.extension, downloaded.size, track.coverUrl || '', coverEmbedded ? 1 : 0, Date.now()
-      ]);
-      song = this.db.get('SELECT * FROM songs WHERE track_id=?', [track.id]);
+      ];
       needsCover = !coverEmbedded && Boolean(track.coverUrl);
     }
-    const filename = path.basename(song.entity_path);
-    await this.fileStore.createPlaylistLink(song.entity_path, row.folder_name, filename);
-    this.db.run('INSERT OR REPLACE INTO playlist_tracks(playlist_id,track_id,filename,linked_at) VALUES (?,?,?,?)', [row.id, track.id, filename, Date.now()]);
+    const entityPath = downloaded?.entityPath || song.entity_path;
+    const filename = path.basename(entityPath);
+    await this.fileStore.createPlaylistLink(entityPath, row.folder_name, filename);
+    this.db.transaction(() => {
+      if (songValues) {
+        this.db.db.run(`INSERT INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,cover_url,cover_embedded,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(track_id) DO UPDATE SET name=excluded.name,artists=excluded.artists,album=excluded.album,
+          duration=excluded.duration,entity_path=excluded.entity_path,extension=excluded.extension,size=excluded.size,
+          cover_url=excluded.cover_url,cover_embedded=excluded.cover_embedded`, songValues);
+        song = this.db.get('SELECT * FROM songs WHERE track_id=?', [track.id]);
+      }
+      this.db.db.run('INSERT OR REPLACE INTO playlist_tracks(playlist_id,track_id,filename,linked_at) VALUES (?,?,?,?)', [row.id, track.id, filename, Date.now()]);
+    });
     this.tasks.recordArtifact({ playlistId: row.id, trackId: track.id, folderName: row.folder_name, filename, entityPath: song.entity_path, createdEntity: Boolean(downloaded?.created) });
     if (needsCover) {
       const fetched = await this.fetchCover(track, control);
@@ -999,6 +1023,13 @@ class AppService {
 
 function dbTrack(row) {
   return { id: row.track_id, name: row.name, artists: parseJson(row.artists, []), album: row.album, duration: row.duration };
+}
+
+function sameSqlRows(left, right) {
+  if (left.length !== right.length) return false;
+  if (!right.length) return true;
+  const keys = Object.keys(right[0]);
+  return left.every((row, index) => keys.every((key) => row[key] === right[index][key]));
 }
 
 function groupBy(rows, key) {

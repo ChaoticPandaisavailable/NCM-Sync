@@ -13,6 +13,7 @@ function applyChanges(state, changes, direction) {
 }
 
 export function planHistory(state, event) {
+  if (event.type === 'toggle-remove') event = { type: 'move', id: event.id, to: state.targets[event.id] === 'remove' ? 'keep' : 'remove', enabled: true };
   if (event.type === 'move' || event.type === 'batch') {
     const changes = (event.type === 'move' ? [{ id: event.id, to: event.to, enabled: event.enabled }] : event.changes).flatMap((entry) => {
       const from = { action: state.targets[entry.id], enabled: state.enabled[entry.id] };
