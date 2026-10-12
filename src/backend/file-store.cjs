@@ -122,7 +122,8 @@ class FileStore {
   }
 
   async createPlaylistLink(entityPath, folderName, filename) {
-    const folderPath = this.ensurePlaylistFolder(folderName);
+    const folderPath = this.playlistPath(folderName);
+    if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) throw new Error('映射的本地文件夹不存在，请重新选择');
     const targetPath = path.join(folderPath, filename);
     if (path.basename(filename) !== filename || !isPathInside(folderPath, targetPath)) throw new Error('歌曲文件名不安全');
     if (fs.existsSync(targetPath)) {

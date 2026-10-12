@@ -31,4 +31,12 @@
 
 - Run `npm.cmd test` and `npm.cmd run test:e2e` with mock accounts and temporary libraries.
 - Inspect the rendered editor and mapping dialog, update README and prepare a PR description.
-- Do not package or touch any existing user music library.
+- Use mock accounts and temporary libraries for all checks. Package and replace desktop application resources only when the user requests updating their installed app.
+
+## 5. Explicit playlist and song selection
+
+- Persist opt-in online playlist IDs with an empty default. Apply the scope to discovery, startup, manual, automatic and realtime processing, including explicit local-ID sync requests.
+- Only match existing directories; missing directories require a custom mapping. Opening or linking songs must not recreate playlist directories.
+- Persist song participation separately from add/remove/keep actions. Unchecked tracks must not download, delete, or receive cover updates. Support batch selection undo and redo.
+- Add list refresh, playlist and song checkboxes, selection counts, local/missing colors, and a restrained interface.
+- Verify selection isolation, directory absence, persistence, colors and batch undo in integration and Electron tests; update the original installed app after packaging checks pass.

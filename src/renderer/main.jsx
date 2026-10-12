@@ -31,11 +31,12 @@ function App() {
   const [context, setContext] = useState(null);
   const onlineAnchor = useRef(null);
   const localAnchor = useRef(null);
+  const pendingScope = useRef(null);
 
   const load = useCallback(async (quiet = false) => {
     try {
       const next = await api.bootstrap();
-      setData(next);
+      setData(pendingScope.current ? { ...next, settings: { ...next.settings, syncPlaylistIds: pendingScope.current } } : next);
       if (!quiet && !next.initialized) setModal({ type: 'setup' });
     } catch (error) { notify(error.message, 'error'); }
     finally { setLoading(false); }
@@ -74,10 +75,11 @@ function App() {
     created: (data?.online || []).filter((item) => item.kind === 'created').length,
     saved: (data?.online || []).filter((item) => item.kind === 'saved').length
   }), [data]);
+  const syncScope = useMemo(() => new Set(data?.settings.syncPlaylistIds || []), [data?.settings.syncPlaylistIds]);
   const onlineSelectedCounts = useMemo(() => ({
-    created: (data?.online || []).filter((item) => item.kind === 'created' && onlineSelected.has(item.id)).length,
-    saved: (data?.online || []).filter((item) => item.kind === 'saved' && onlineSelected.has(item.id)).length
-  }), [data, onlineSelected]);
+    created: (data?.online || []).filter((item) => item.kind === 'created' && syncScope.has(item.id)).length,
+    saved: (data?.online || []).filter((item) => item.kind === 'saved' && syncScope.has(item.id)).length
+  }), [data, syncScope]);
   const onlineRows = useMemo(() => sortRows((data?.online || [])
     .filter((item) => item.kind === onlineTab)
     .filter((item) => item.name.toLowerCase().includes(onlineSearch.toLowerCase())), onlineSort), [data, onlineTab, onlineSearch, onlineSort]);
@@ -103,6 +105,8 @@ function App() {
   }
 
   async function showOnlineDetail(item) {
+    const mapped = data.local.find((row) => row.onlineId === item.id);
+    if (mapped) return showLocalDetail(mapped);
     setModal({ type: 'loading', title: item.name });
     const detail = await action('detail', () => api.detail(item.id));
     if (detail) setModal({ type: 'tracks', title: item.name, tracks: detail.tracks }); else setModal(null);
@@ -129,9 +133,19 @@ function App() {
 
   async function scan() { await action('scan', api.scan, '扫描更新完成'); }
   async function addSelected() {
-    if (!onlineSelected.size) return;
-    const result = await action('add', () => api.addLocal([...onlineSelected]), `已添加 ${onlineSelected.size} 个歌单`);
-    if (result) setOnlineSelected(new Set());
+    if (!syncScope.size) return;
+    await action('add', () => api.addLocal([...syncScope]), (result) => result.unmatched.length
+      ? `已匹配 ${result.added.length} 个歌单；${result.unmatched.length} 个未找到目录，请自定义映射`
+      : `已匹配 ${result.added.length} 个歌单`);
+  }
+  async function choosePlaylists(ids, enabled) {
+    const next = new Set(syncScope);
+    for (const id of ids) if (enabled) next.add(id); else next.delete(id);
+    pendingScope.current = [...next];
+    setData((old) => ({ ...old, settings: { ...old.settings, syncPlaylistIds: pendingScope.current } }));
+    const result = await action('selection', () => api.selectPlaylists([...next]));
+    pendingScope.current = null;
+    if (!result) await load(true);
   }
   async function sync(ids) { await action('sync', () => api.sync(ids), '同步任务已开始'); }
   async function toggleRealtime(enabled) { await action('realtime', () => api.saveSettings({ realtimeSync: enabled }), enabled ? '实时同步已开启' : '实时同步已关闭'); }
@@ -164,7 +178,10 @@ function App() {
   if (loading || !data) return <div className="loading-screen"><Logo /><span>正在启动本地同步服务…</span></div>;
   const selectedLocalRows = data.local.filter((row) => localSelected.has(row.id));
   const selectedAllPaused = selectedLocalRows.length && selectedLocalRows.every((row) => row.paused);
-  const hasUnsynced = data.local.some((row) => !row.paused && !row.offline && row.needsSync);
+  const matchedSelected = data.local.filter((row) => syncScope.has(row.onlineId) && !row.paused && !row.offline);
+  const hasUnsynced = matchedSelected.some((row) => row.needsSync);
+  const selectionBlocked = Boolean(busy) || data.scanning || data.task.active;
+  const allVisibleSelected = onlineRows.length > 0 && onlineRows.every((row) => syncScope.has(row.id));
   const progress = taskPercent(data.task);
 
   return <div className="app-shell">
@@ -178,47 +195,54 @@ function App() {
 
     <main className="workspace">
       <section className="pane online-pane">
-        <PaneHeading eyebrow="ONLINE" title="在线歌单" count={data.online.length} />
+        <PaneHeading eyebrow="ONLINE" title="在线歌单" count={data.online.length} action={<button className="refresh-playlists" disabled={selectionBlocked} onClick={() => action('refresh', api.refresh, '歌单列表已刷新')}><span>↻</span> 刷新歌单</button>} />
         <Search value={onlineSearch} onChange={setOnlineSearch} placeholder={`在 ${onlineTab === 'created' ? '创建的歌单' : '收藏的歌单'} 中搜索`} />
         <div className="tabs">
           {['created','saved'].map((tab) => <button key={tab} className={onlineTab === tab ? 'active' : ''} onClick={() => setOnlineTab(tab)}>
             <span>{tab === 'created' ? '创建的歌单' : '收藏的歌单'} <b>{onlineCounts[tab]}</b></span><small className={`tab-selection-count ${onlineTab === tab ? '' : 'inactive'}`} aria-hidden={onlineTab !== tab}>已选：{onlineSelectedCounts[tab]}</small>
           </button>)}
         </div>
-        <div className="table-wrap" tabIndex="0" onKeyDown={(event) => tableKeyDown(event, onlineRows, setOnlineSelected)}>
+        <div className="playlist-selection-toolbar"><span>同步范围 <b>{syncScope.size}</b> 个歌单</span><div>
+          <button disabled={selectionBlocked || !onlineRows.length} onClick={() => choosePlaylists(onlineRows.map((row) => row.id), !allVisibleSelected)}>{allVisibleSelected ? '取消全选' : '全选当前列表'}</button>
+          <button disabled={selectionBlocked || !syncScope.size} onClick={() => choosePlaylists([...syncScope], false)}>清空选择</button>
+        </div></div>
+        <div className="table-wrap" tabIndex="0" onKeyDown={(event) => { if (event.ctrlKey && event.key.toLowerCase() === 'a') { event.preventDefault(); if (!selectionBlocked) choosePlaylists(onlineRows.map((row) => row.id), true); } }}>
           <table><thead><tr>
+            <th className="check-col"><input className="selection-checkbox" aria-label="选择当前列表的全部歌单" type="checkbox" checked={allVisibleSelected} disabled={selectionBlocked || !onlineRows.length} onChange={(event) => choosePlaylists(onlineRows.map((row) => row.id), event.target.checked)} /></th>
             <Sortable label="名称" sort={onlineSort} field="name" setSort={setOnlineSort} />
             <Sortable label="歌曲数" sort={onlineSort} field="trackCount" setSort={setOnlineSort} />
             <Sortable label="创建日期" sort={onlineSort} field="createdAt" setSort={setOnlineSort} />
           </tr></thead><tbody>
-            {onlineRows.map((item) => <tr key={item.id} className={onlineSelected.has(item.id) ? 'selected' : ''}
+            {onlineRows.map((item) => <tr key={item.id} className={`${onlineSelected.has(item.id) ? 'selected' : ''} ${syncScope.has(item.id) ? 'sync-selected' : ''}`}
               onClick={(event) => toggleSelection(event, item, onlineRows, onlineSelected, setOnlineSelected, onlineAnchor)} onDoubleClick={() => showOnlineDetail(item)}>
-              <td><div className="name-cell"><span>{item.name}</span></div></td><td>{item.trackCount}</td><td>{date(item.createdAt)}</td>
+              <td className="check-col" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}><input className="selection-checkbox" aria-label={`同步歌单：${item.name}`} type="checkbox" checked={syncScope.has(item.id)} disabled={selectionBlocked} onChange={(event) => { setOnlineSelected(new Set([item.id])); choosePlaylists([item.id], event.target.checked); }} /></td>
+              <td><div className="name-cell"><span>{item.name}</span><small className={data.local.some((row) => row.onlineId === item.id && !row.offline) ? 'mapped-label' : 'unmapped-label'}>{data.local.some((row) => row.onlineId === item.id && !row.offline) ? '已映射' : '待匹配目录'}</small></div></td><td>{item.trackCount}</td><td>{date(item.createdAt)}</td>
             </tr>)}
-            {!onlineRows.length && <EmptyRow columns={3} text={data.settings.userId ? '没有匹配的在线歌单' : '请先在设置中填写用户 ID'} />}
+            {!onlineRows.length && <EmptyRow columns={4} text={data.settings.userId ? '没有匹配的在线歌单' : '请先在设置中填写用户 ID'} />}
           </tbody></table>
         </div>
-        <button className="primary wide" disabled={!onlineSelected.size || busy || data.scanning} onClick={addSelected}>＋ 添加到本地歌单 <kbd>{onlineSelected.size || ''}</kbd></button>
+        <div className="online-footer"><button disabled={!syncScope.size || selectionBlocked} onClick={addSelected}>匹配所选歌单的现有目录</button>
         <button className="map-online-button" disabled={onlineSelected.size !== 1 || busy || data.scanning || data.task.active} onClick={() => {
           const onlineId = [...onlineSelected][0];
           setModal({ type: 'mapping', onlineId, item: data.local.find((item) => item.onlineId === onlineId) });
-        }}>自定义映射到本地文件夹</button>
+        }}>自定义映射到本地文件夹</button></div>
+        <p className="scope-help">只处理勾选的歌单 · 自动匹配同名子目录 · 不创建歌单文件夹</p>
       </section>
 
       <section className="sync-rail">
-        <div className="rail-line" />
-        <label className="realtime-switch" title="持续检测所有未暂停歌单，发现更新后立即下载"><span>实时同步</span><input aria-label="实时同步" type="checkbox" checked={Boolean(data.settings.realtimeSync)} disabled={busy === 'realtime'} onChange={(event) => toggleRealtime(event.target.checked)} /><i /></label>
+        <div className="sync-scope-summary"><strong>{syncScope.size}</strong><span>已选歌单</span><small>{matchedSelected.length} 个映射可用</small></div>
+        <label className="realtime-switch" title="只监测和同步左侧勾选的歌单"><span>实时同步</span><input aria-label="实时同步" type="checkbox" checked={Boolean(data.settings.realtimeSync)} disabled={selectionBlocked} onChange={(event) => toggleRealtime(event.target.checked)} /><i /></label>
         <div className={`sync-progress-ring ${data.task.active ? 'active' : ''} ${data.settings.realtimeSync && !data.task.active ? 'realtime' : ''}`}>
-          <svg className="progress-ring" viewBox="0 0 120 120" aria-hidden="true"><circle className="progress-ring-track" cx="60" cy="60" r="56" pathLength="100" /><circle className="progress-ring-value" cx="60" cy="60" r="56" pathLength="100" style={{ strokeDashoffset: 100 - progress }} /></svg>
-          <button className="sync-button" disabled={busy || data.task.active || data.scanning || !data.local.length} onClick={() => sync()}>
-            <span>⇄</span><strong>{data.settings.realtimeSync ? '实时同步中' : '一键同步'}</strong><small>{data.task.active ? `${Math.round(progress)}%` : data.settings.realtimeSync ? '持续监测已匹配歌单' : hasUnsynced ? '有更新待处理' : '仅同步已匹配歌单'}</small>
+          <button className="sync-button" disabled={selectionBlocked || !syncScope.size} onClick={() => sync()}>
+            <span>⇄</span><strong>{data.task.active ? '正在同步' : '同步所选'}</strong><small>{data.task.active ? `${Math.round(progress)}%` : hasUnsynced ? '有更新待处理' : '仅处理勾选歌单'}</small>
           </button>
+          {data.task.active && <div className="sync-linear-progress" role="progressbar" aria-label="同步进度" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${progress}%` }} /></div>}
         </div>
         <div className="rail-task-controls">
           <button disabled={!data.task.active} onClick={() => action('task', data.task.paused ? api.resumeTask : api.pauseTask, data.task.paused ? '任务已继续' : '任务已暂停')}>{data.task.paused ? '▶ 继续任务' : 'Ⅱ 暂停任务'}</button>
           <button disabled={!data.task.active} onClick={confirmCancel}>× 取消任务</button>
         </div>
-        <div className="rail-line" />
+        <p className="rail-hint">未勾选的歌单保持原样</p>
       </section>
 
       <section className="pane local-pane">
@@ -234,11 +258,11 @@ function App() {
           </tr></thead><tbody>
             {localRows.map((item) => <tr key={item.id} className={localSelected.has(item.id) ? 'selected' : ''}
               onClick={(event) => toggleSelection(event, item, localRows, localSelected, setLocalSelected, localAnchor)} onDoubleClick={() => showLocalDetail(item)} onContextMenu={(event) => openContext(event, item)}>
-              <td><StatusBadge status={item.status} /></td>
+              <td><StatusBadge status={item.status} />{!syncScope.has(item.onlineId) && <small className="out-of-scope">未选择</small>}</td>
               <td><div className="local-name"><strong>{item.displayName}</strong><span className="playlist-path" title={item.folderPath}>{item.folderPath}</span><button className="mapping-link" disabled={Boolean(busy) || data.task.active || data.scanning} onClick={(event) => { event.stopPropagation(); setModal({ type: 'mapping', item }); }}>修改映射</button>{item.pendingName && <button className="rename-hint" onClick={(event) => { event.stopPropagation(); action('rename', () => api.renameFolder(item.id), '文件夹已同步重命名'); }}>同步文件夹名称</button>}{item.syncProgress && <small>{item.syncProgress}</small>}</div></td>
               <td>{item.trackCount}</td><td><ChangeBadges item={item} /></td><td>{date(item.createdAt)}</td>
             </tr>)}
-            {!localRows.length && <EmptyRow columns={5} text="还没有本地歌单，从左侧选择后添加" />}
+            {!localRows.length && <EmptyRow columns={5} text="勾选在线歌单后匹配现有目录，或自定义映射" />}
           </tbody></table>
         </div>
         <div className="pane-actions">
@@ -274,7 +298,7 @@ function StatusBadge({ status }) { return <span className={`status-badge ${statu
 function ChangeBadges({ item }) { return <div className={`badges ${item.paused ? 'muted' : ''}`}>{item.addedCount > 0 && <span className="plus">+{item.addedCount}</span>}{item.removedCount > 0 && <span className="minus">−{item.removedCount}</span>}{!item.addedCount && !item.removedCount && <span>—</span>}</div>; }
 
 function ContextMenu({ x, y, item, data, onClose, onDetail, onSync, onPause, onRemove, onRedirect, onOpen, onMap }) {
-  const syncDisabled = item.paused || item.offline || data.scanning || data.task.active;
+  const syncDisabled = item.paused || item.offline || data.scanning || data.task.active || !data.settings.syncPlaylistIds.includes(item.onlineId);
   const click = (fn) => () => { onClose(); fn(item); };
   return <div className="context-menu" style={{ left: Math.min(x, innerWidth - 230), top: Math.min(y, innerHeight - 300) }} onClick={(event) => event.stopPropagation()}>
     <button onClick={click(onOpen)}>▣ 打开文件夹</button><button onClick={click(onDetail)}>≡ 查看更新详情</button>
@@ -305,7 +329,7 @@ function ModalRouter({ modal, data, busy, close, setupUser, action }) {
   if (modal.type === 'tracks') return <TracksModal title={modal.title} tracks={modal.tracks} close={close} />;
   if (modal.type === 'changes') {
     const live = data.local.find((entry) => entry.id === modal.item.id);
-    return live ? <PlaylistEditor item={modal.item} blocked={Boolean(busy) || data.task.active || data.scanning} syncDisabled={live.paused || live.offline} close={close} Dialog={Dialog}
+    return live ? <PlaylistEditor item={modal.item} blocked={Boolean(busy) || data.task.active || data.scanning} syncDisabled={live.paused || live.offline || !data.settings.syncPlaylistIds.includes(live.onlineId)} close={close} Dialog={Dialog}
       save={(revision, changes) => action('song-plan', () => api.saveChoices(live.id, revision, changes), '歌曲方案已保存')}
       sync={() => action('sync', () => api.sync([live.id]), '当前歌单同步已开始')} /> : null;
   }
@@ -429,6 +453,21 @@ function RedirectModal({ item, online, busy, close, submit }) {
 }
 
 function taskPercent(task) { if (!task.total) return 0; const perPlaylist = 100 / task.total; const trackPart = task.downloadTotal ? task.downloaded / task.downloadTotal : 1; return Math.min(100, ((task.current - 1) + trackPart) * perPlaylist); }
-function statusText(data) { if (!data.settings.userId) return '当前未设置用户 ID，请先设置后使用同步功能'; if (data.task.error) return data.task.error; if (data.task.active) { const source = data.task.source === 'realtime' ? '实时同步' : data.task.source === 'auto' ? '自动同步' : '正在同步'; return data.task.paused ? `${source}任务已暂停` : `${source} ${data.task.current}/${data.task.total} 个歌单 · ${data.task.downloaded}/${data.task.downloadTotal}（并行 ${data.task.activeDownloads || 0}/${data.task.concurrency || 1}）`; } if (data.scanning) return data.scanStatus || '正在扫描本地与在线歌单差异…'; if (/失败|取消|中断|请重新/.test(data.scanStatus)) return data.scanStatus; const pending = data.local.filter((row) => row.status === 'pending').length; if (pending) return `${pending} 个歌单有更新待同步`; if (data.settings.realtimeSync) return '实时同步正在监测所有未暂停歌单'; return data.lastScanAt || data.lastSyncAt ? '所有本地歌单已同步' : '等待首次扫描'; }
+function statusText(data) {
+  if (!data.settings.userId) return '请先设置网易云用户 ID';
+  if (data.task.error) return data.task.error;
+  if (data.task.active) {
+    const source = data.task.source === 'realtime' ? '实时同步' : data.task.source === 'auto' ? '自动同步' : '正在同步';
+    return data.task.paused ? `${source}任务已暂停` : `${source} ${data.task.current}/${data.task.total} 个歌单 · ${data.task.downloaded}/${data.task.downloadTotal} 首`;
+  }
+  if (data.scanning) return data.scanStatus || '正在检查所选歌单…';
+  const scope = new Set(data.settings.syncPlaylistIds);
+  if (!scope.size) return '勾选左侧歌单，选择你的同步范围';
+  if (/失败|取消|中断|请重新/.test(data.scanStatus)) return data.scanStatus;
+  const pending = data.local.filter((row) => scope.has(row.onlineId) && row.status === 'pending').length;
+  if (pending) return `${pending} 个所选歌单有更新待同步`;
+  if (data.settings.realtimeSync) return '实时同步正在监测所选歌单';
+  return `已选 ${scope.size} 个歌单，点击同步所选开始`;
+}
 
 createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);

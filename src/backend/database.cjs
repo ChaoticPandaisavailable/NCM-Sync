@@ -86,12 +86,18 @@ class Database {
     this.migrateSongs();
     const localColumns = new Set(this.all('PRAGMA table_info(local_playlists)').map((row) => row.name));
     if (!localColumns.has('custom_mapping')) this.db.run('ALTER TABLE local_playlists ADD COLUMN custom_mapping INTEGER NOT NULL DEFAULT 0');
+    const choiceColumns = new Set(this.all('PRAGMA table_info(track_choices)').map((row) => row.name));
+    if (!choiceColumns.has('enabled')) {
+      this.db.run('ALTER TABLE track_choices ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
+      this.db.run(`UPDATE track_choices SET enabled=0 WHERE action<>'add' AND NOT EXISTS
+        (SELECT 1 FROM playlist_tracks pt WHERE pt.playlist_id=track_choices.playlist_id AND pt.track_id=track_choices.track_id)`);
+    }
     const defaults = {
       userId: '', initialized: false, autoScan: false, autoSync: false, realtimeSync: false,
       scanHours: 1, scanMinutes: 0, deleteRemoved: false, downloadConcurrency: 4,
       renamePolicy: 'ask', cancelDeleteDownloaded: false,
       cancelDontAsk: false, removeLocalDontAsk: false, cookie: '', interruptedTask: false,
-      lastGlobalStatus: '', libraryPath: '', lastScanAt: null, lastSyncAt: null
+      lastGlobalStatus: '', libraryPath: '', lastScanAt: null, lastSyncAt: null, syncPlaylistIds: []
     };
     for (const [key, value] of Object.entries(defaults)) {
       this.db.run('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)', [key, JSON.stringify(value)]);

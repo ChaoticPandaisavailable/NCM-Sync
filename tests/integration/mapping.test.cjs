@@ -24,7 +24,17 @@ async function fixture(t, prepare = () => {}) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   await service.setupUser('123456789');
+  service.setSyncSelection(service.onlinePlaylists().map((item) => item.id));
+  await service.discoverExistingPlaylistFolders();
   return { root, fileStore, db, tasks, service };
+}
+
+async function addExisting(service, ids) {
+  for (const id of ids) {
+    const row = service.onlinePlaylists().find((item) => item.id === id);
+    fs.mkdirSync(path.join(service.rootPath, row.name), { recursive: true });
+  }
+  return service.addLocal(ids);
 }
 
 async function sync(service, ids) {
@@ -130,7 +140,7 @@ test('目录联接不被递归读取，也不能作为手动映射和删除目�
 
 test('被目录联接替换的映射进入离线状态，不影响其他歌单和后续修复', async (t) => {
   const { root, service } = await fixture(t);
-  await service.addLocal(['1001', '1002']);
+  await addExisting(service, ['1001', '1002']);
   const item = service.localPlaylists().find((row) => row.onlineId === '1001');
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ncmsync-mapping-external-'));
   t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
@@ -149,7 +159,7 @@ test('被目录联接替换的映射进入离线状态，不影响其他歌单�
 
 test('逐曲方案保存不修改文件；留存、跳过、删除在扫描和重启后保持，且只作用于当前歌单', async (t) => {
   const { service, root, db, fileStore } = await fixture(t);
-  await service.addLocal(['1001', '1002']);
+  await addExisting(service, ['1001', '1002']);
   const item = service.localPlaylists().find((row) => row.onlineId === '1001');
   let saved = await service.saveTrackChoices(item.id, item.revision, [{ id: '502', action: 'keep' }]);
   assert.equal(fs.readdirSync(saved.folderPath).length, 0, '保存方案不能下载或删除');
@@ -173,7 +183,7 @@ test('逐曲方案保存不修改文件；留存、跳过、删除在扫描和�
 
 test('明确留存覆盖全局删除开关，保存旧版本和任务中修改被拒绝', async (t) => {
   const { service, db } = await fixture(t);
-  await service.addLocal(['1001']); await sync(service);
+  await addExisting(service, ['1001']); await sync(service);
   const item = service.localPlaylists()[0];
   db.setSettings({ deleteRemoved: true });
   const detail = await service.netease.getPlaylist('1001');
@@ -191,23 +201,23 @@ test('明确留存覆盖全局删除开关，保存旧版本和任务中修改�
 
 test('一键同步只处理有效一对一映射，空选择不能扩大到所有歌单', async (t) => {
   const { service, db } = await fixture(t);
-  await service.addLocal(['1001', '1002']);
+  await addExisting(service, ['1001', '1002']);
   const first = service.localPlaylists().find((row) => row.onlineId === '1001');
   const second = service.localPlaylists().find((row) => row.onlineId === '1002');
-  assert.throws(() => service.startSync([]), /没有可同步/);
+  assert.throws(() => service.startSync([]), /没有可用映射/);
   db.run('UPDATE local_playlists SET online_id=? WHERE id=?', ['missing-online', second.id]);
   await sync(service);
   assert.equal(service.localDetail(first.id).trackCount, 2);
   assert.equal(service.localDetail(second.id).trackCount, 0);
-  assert.equal(service.localDetail(second.id).offline, true);
+  assert.equal(service.localDetail(second.id).offline, false, '未勾选的来源不能被同步任务修改');
   fs.rmSync(first.folderPath, { recursive: true });
-  assert.throws(() => service.startSync([first.id]), /没有可同步/);
+  assert.throws(() => service.startSync([first.id]), /没有可用映射/);
   assert.equal(fs.existsSync(first.folderPath), false, '同步不能自动新建丢失的映射目录');
 });
 
 test('轮询摘要不携带数千首歌曲，详情按需读取且静态轮询复用缓存', async (t) => {
   const { service, db } = await fixture(t);
-  await service.addLocal(['1999']);
+  await addExisting(service, ['1999']);
   const item = service.localPlaylists()[0];
   const full = service.bootstrap();
   const summary = service.bootstrap({ summary: true });

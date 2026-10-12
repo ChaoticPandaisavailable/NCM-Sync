@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-test('首次设置音乐库会自动发现同名在线歌单文件夹', async () => {
+test('首次设置不操作歌单，勾选后才识别现有同名文件夹', async () => {
   const projectRoot = path.resolve(__dirname, '../..');
   const defaultRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ncmsync-e2e-default-'));
   const musicRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudmusic-e2e-discovery-'));
@@ -22,10 +22,13 @@ test('首次设置音乐库会自动发现同名在线歌单文件夹', async ()
     await page.getByTestId('setup-library-path').fill(musicRoot);
     await page.getByTestId('setup-user-id').fill('123456789');
     await page.getByRole('button', { name: '验证并继续' }).click();
+    await expect(page.locator('.local-pane tbody tr:not(.empty-row)')).toHaveCount(0);
+    await page.getByLabel('同步歌单：夜航测试集', { exact: true }).check();
+    await page.getByRole('button', { name: '匹配所选歌单的现有目录' }).click();
     await expect(page.locator('.local-pane tbody tr:not(.empty-row)')).toHaveCount(1);
     await expect(page.locator('.local-pane')).toContainText('夜航测试集');
     await expect(page.locator('.local-pane')).toContainText('+1');
-    await expect(page.locator('.global-status')).toContainText('1 个歌单有更新待同步');
+    await expect(page.locator('.global-status')).toContainText('1 个所选歌单有更新待同步');
     await expect.poll(() => fs.readdirSync(path.join(musicRoot, 'songs')).length).toBe(1);
   } finally {
     await app.close();
@@ -79,6 +82,8 @@ test('NCM Sync 首次设置、扫描、排序、同步和安全删除完整桌�
     await expect(savedTab.locator('small')).toHaveCSS('opacity', '0');
     const initialTabHeights = await page.locator('.online-pane .tabs button').evaluateAll((tabs) => tabs.map((tab) => Math.round(tab.getBoundingClientRect().height)));
     await page.locator('.online-pane tbody tr').first().click();
+    await expect(createdTab.locator('small')).toHaveText('已选：0');
+    await page.getByLabel('同步歌单：夜航测试集', { exact: true }).check();
     await expect(createdTab.locator('small')).toHaveText('已选：1');
     await savedTab.click();
     await expect(createdTab.locator('small')).toHaveText('已选：1');
@@ -92,7 +97,7 @@ test('NCM Sync 首次设置、扫描、排序、同步和安全删除完整桌�
     await expect(savedTab.locator('small')).toHaveCSS('opacity', '0');
     await expect(page.locator('.online-pane .cover-placeholder')).toHaveCount(0);
     const onlineHeaders = await page.locator('.online-pane thead th').evaluateAll((headers) => headers.map((header) => header.textContent.replace(/[↑↓]/g, '').trim()));
-    expect(onlineHeaders).toEqual(['名称', '歌曲数', '创建日期']);
+    expect(onlineHeaders).toEqual(['', '名称', '歌曲数', '创建日期']);
     await expect(page.locator('.local-pane .pane-heading .library-location')).toBeVisible();
     const headerDate = await page.locator('.status-times').textContent();
     expect(headerDate).toMatch(/\d{2}\/\d{2}\/\d{2} \d{2}:\d{2}/);
@@ -152,16 +157,16 @@ test('NCM Sync 首次设置、扫描、排序、同步和安全删除完整桌�
     await expect(cookieInput).toHaveAttribute('type', 'password');
     await page.getByRole('button', { name: '取消', exact: true }).click();
     await page.locator('.online-pane tbody tr').first().click();
-    await page.getByRole('button', { name: /添加到本地歌单/ }).click();
+    fs.mkdirSync(path.join(musicRoot, '夜航测试集'));
+    await page.getByRole('button', { name: '匹配所选歌单的现有目录' }).click();
     await expect(page.locator('.local-pane tbody tr')).toHaveCount(1);
     await expect(page.locator('.local-pane')).toContainText('+2');
 
-    await page.getByRole('button', { name: '一键同步' }).click();
+    await page.getByRole('button', { name: '同步所选' }).click();
     await expect(page.getByRole('button', { name: /暂停任务/ })).toBeEnabled();
-    await expect(page.locator('.progress-ring-value')).toHaveCSS('stroke-linecap', 'round');
-    expect(await page.locator('.progress-ring-value').evaluate((node) => getComputedStyle(node).transitionTimingFunction)).toContain('cubic-bezier');
     await page.getByRole('button', { name: /暂停任务/ }).click();
     await expect(page.getByRole('button', { name: /继续任务/ })).toBeVisible();
+    await expect(page.getByRole('progressbar', { name: '同步进度' })).toBeVisible();
     await page.getByRole('button', { name: /继续任务/ }).click();
     await expect.poll(() => fs.readdirSync(path.join(musicRoot, 'songs')).length).toBe(2);
     await expect.poll(() => fs.readdirSync(path.join(musicRoot, '夜航测试集')).length).toBe(2);
@@ -240,14 +245,14 @@ test('NCM Sync 首次设置、扫描、排序、同步和安全删除完整桌�
     expect(realtimePositions[0]).toBeLessThan(realtimePositions[1]);
     await page.locator('.realtime-switch').click();
     await expect(realtimeSwitch).toBeChecked();
-    await expect(page.locator('.sync-button strong')).toHaveText('实时同步中');
+    await expect(page.locator('.sync-button strong')).toHaveText('同步所选');
     await expect(page.locator('.sync-progress-ring')).toHaveClass(/realtime/);
-    expect(await page.locator('.progress-ring').evaluate((node) => getComputedStyle(node).animationName)).toContain('realtime-ring-spin');
+    expect(fs.existsSync(path.join(musicRoot, '夜航测试集'))).toBe(false, '实时同步不能重建被删除的歌单目录');
     await page.screenshot({ path: path.join(projectRoot, 'test-results', 'ncmsync-realtime-e2e.png'), fullPage: true });
     await expect(page.getByRole('button', { name: '扫描更新' })).toBeEnabled();
     await savedTab.click();
-    await page.locator('.online-pane tbody tr').first().click();
-    await page.getByRole('button', { name: /添加到本地歌单/ }).click();
+    fs.mkdirSync(path.join(musicRoot, '收藏节拍'));
+    await page.getByLabel('同步歌单：收藏节拍', { exact: true }).check();
     await expect(page.locator('.local-pane tbody tr:not(.empty-row)')).toHaveCount(1);
     await expect(page.locator('.global-status')).toContainText('实时同步');
     await expect(page.locator('.local-pane .local-name small')).toContainText('正在同步：');

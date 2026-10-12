@@ -19,6 +19,9 @@ test('子目录映射、三栏拖拽、撤回重做与按歌单同步完整流�
     page.on('pageerror', (error) => errors.push(error.message));
     await page.getByTestId('setup-user-id').fill('123456789');
     await page.getByRole('button', { name: '验证并继续' }).click();
+    await expect(page.locator('.local-pane tbody tr:not(.empty-row)')).toHaveCount(0);
+    await page.getByLabel('同步歌单：夜航测试集', { exact: true }).check();
+    await page.getByRole('button', { name: '匹配所选歌单的现有目录' }).click();
     await expect(page.locator('.local-pane .playlist-path')).toHaveText(original);
     await page.getByRole('button', { name: '修改映射', exact: true }).click();
     await expect(page.getByLabel('映射的网易云歌单')).toHaveValue('1001');
@@ -27,8 +30,9 @@ test('子目录映射、三栏拖拽、撤回重做与按歌单同步完整流�
     await page.screenshot({ path: path.join(projectRoot, 'test-results', 'playlist-mapping.png'), fullPage: true });
     await page.getByRole('button', { name: '保存映射', exact: true }).click();
     await expect(page.locator('.local-pane .playlist-path')).toHaveText(target);
-    const response = await page.evaluate(() => fetch('/api/local', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ onlineIds: ['1002'] }) }).then((res) => res.json()));
-    expect(response.added).toHaveLength(1);
+    const other = path.join(musicRoot, 'Saved'); fs.mkdirSync(other);
+    const response = await page.evaluate((folderPath) => fetch('/api/local/map', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ onlineId: '1002', folderPath }) }).then((res) => res.json()), other);
+    expect(response.onlineId).toBe('1002');
     await expect(page.locator('.local-pane tbody tr:not(.empty-row)')).toHaveCount(2);
     await page.screenshot({ path: path.join(projectRoot, 'test-results', 'playlist-paths.png'), fullPage: true });
     const row = page.locator('.local-pane tbody tr').filter({ hasText: 'Custom mix' });
@@ -57,7 +61,7 @@ test('子目录映射、三栏拖拽、撤回重做与按歌单同步完整流�
     await page.getByRole('button', { name: '同步当前歌单', exact: true }).click();
     await expect(page.locator('.dialog')).toHaveCount(0);
     await expect.poll(() => fs.readdirSync(target).length).toBe(1);
-    expect(fs.readdirSync(path.join(musicRoot, '收藏节拍'))).toHaveLength(0);
+    expect(fs.readdirSync(other)).toHaveLength(0);
     expect(fs.readdirSync(original)).toHaveLength(1);
     await expect(row.locator('.status-badge')).toHaveText('同步');
     await row.dblclick();

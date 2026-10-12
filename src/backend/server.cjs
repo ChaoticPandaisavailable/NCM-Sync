@@ -26,7 +26,8 @@ function createServer({ service, staticPath, port = 0, rendererOrigin = '' }) {
   app.get('/api/online/:id', asyncHandler(async (req, res) => res.json(await service.playlistDetail(req.params.id))));
   app.post('/api/local', asyncHandler(async (req, res) => res.json(await service.addLocal(req.body.onlineIds))));
   app.post('/api/scan', asyncHandler(async (_req, res) => res.json(await service.scanAll())));
-  app.post('/api/sync', asyncHandler(async (req, res) => { res.status(202).json(service.startSync(req.body.ids)); }));
+  app.put('/api/sync/selection', asyncHandler(async (req, res) => res.json(service.setSyncSelection(req.body.onlineIds))));
+  app.post('/api/sync', asyncHandler(async (req, res) => { res.status(202).json(await service.syncSelected(req.body.ids)); }));
   app.post('/api/local/pause', asyncHandler(async (req, res) => res.json({ local: service.setLocalPaused(req.body.ids, req.body.paused) })));
   app.post('/api/local/remove', asyncHandler(async (req, res) => res.json({ local: await service.removeLocal(req.body.ids) })));
   app.post('/api/local/:id/redirect', asyncHandler(async (req, res) => res.json({ local: await service.redirectLocal(req.params.id, req.body.onlineId) })));

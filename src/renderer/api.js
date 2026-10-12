@@ -20,6 +20,7 @@ export const api = {
   addLocal: (onlineIds) => request('/api/local', { method: 'POST', body: JSON.stringify({ onlineIds }) }),
   scan: () => request('/api/scan', { method: 'POST' }),
   sync: (ids) => request('/api/sync', { method: 'POST', body: JSON.stringify({ ids }) }),
+  selectPlaylists: (onlineIds) => request('/api/sync/selection', { method: 'PUT', body: JSON.stringify({ onlineIds }) }),
   pauseLocal: (ids, paused) => request('/api/local/pause', { method: 'POST', body: JSON.stringify({ ids, paused }) }),
   removeLocal: (ids) => request('/api/local/remove', { method: 'POST', body: JSON.stringify({ ids }) }),
   redirect: (id, onlineId) => request(`/api/local/${id}/redirect`, { method: 'POST', body: JSON.stringify({ onlineId }) }),
