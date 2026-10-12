@@ -112,7 +112,6 @@ test('映射拒绝库外路径、保留目录、重复来源以及嵌套目录',
   const { root, service } = await fixture(t);
   const target = path.join(root, 'sets', 'mix'); fs.mkdirSync(target, { recursive: true });
   await assert.rejects(service.mapPlaylist('1001', path.dirname(root)), /音乐库内/);
-  await assert.rejects(service.mapPlaylist('1001', root), /音乐库内/);
   await assert.rejects(service.mapPlaylist('1001', path.join(root, 'songs')), /实体库/);
   await assert.rejects(service.mapPlaylist('1001', path.join(root, '.cloudmusic')), /应用数据/);
   await service.mapPlaylist('1001', target);
@@ -122,6 +121,90 @@ test('映射拒绝库外路径、保留目录、重复来源以及嵌套目录',
   await assert.rejects(service.mapPlaylist('1002', path.join(target, 'child')), /重复或互相嵌套/);
   fs.mkdirSync(path.join(root, 'other'));
   await assert.rejects(service.mapPlaylist('1001', path.join(root, 'other')), /已有本地映射/);
+});
+
+test('根目录映射只识别直属歌曲，与子目录映射独立且不能重复占用根目录', async (t) => {
+  const { root, service, fileStore, db } = await fixture(t);
+  fs.writeFileSync(path.join(root, 'Test Artist - Neon Run.mp3'), 'root-neon');
+  fs.writeFileSync(path.join(root, 'notes.txt'), 'unrelated-root-file');
+  const child = path.join(root, 'Saved'); fs.mkdirSync(child);
+  fs.writeFileSync(path.join(child, 'Friend - Saved Groove.mp3'), 'child-saved');
+  fs.writeFileSync(path.join(child, 'Demo Unit - Last Train.mp3'), 'not-a-root-song');
+  const saved = await service.mapPlaylist('1002', child);
+  const item = await service.mapPlaylist('1001', root);
+  assert.equal(item.folderName, '.');
+  assert.equal(item.libraryRoot, true);
+  assert.equal(item.folderPath, root);
+  assert.equal(item.displayName, '夜航测试集（音乐库根目录）');
+  assert.deepEqual(item.existing.map((track) => track.id), ['501']);
+  assert.deepEqual(item.added.map((track) => track.id), ['502']);
+  assert.equal(fileStore.relativePlaylistPath(root), '.');
+  await assert.rejects(service.mapPlaylist('1999', root), /重复/);
+  await assert.rejects(service.mapPlaylist('1999', ''), /请选择/);
+  await assert.rejects(fileStore.removePlaylistFolder('.'), /拒绝删除/);
+  await assert.rejects(service.syncFolderName(item.id), /根目录不能/);
+  await sync(service, [item.id]);
+  assert.ok(fs.existsSync(path.join(root, 'Demo Unit - Last Train [502].mp3')));
+  assert.equal(fs.readFileSync(path.join(child, 'Demo Unit - Last Train.mp3'), 'utf8'), 'not-a-root-song');
+  await service.scanAll();
+  assert.equal(service.localDetail(item.id).folderName, '.');
+  assert.equal(service.localDetail(saved.id).folderPath, child);
+  const retained = fs.readdirSync(root).sort();
+  const entities = fs.readdirSync(fileStore.songsPath).sort();
+  await service.removeLocal([item.id]);
+  assert.deepEqual(fs.readdirSync(root).sort(), retained, '移除根目录映射不能删除根目录文件');
+  assert.deepEqual(fs.readdirSync(fileStore.songsPath).sort(), entities, '实体文件也应保留');
+  await sync(service, [saved.id]);
+  assert.deepEqual(fs.readdirSync(fileStore.songsPath).sort(), entities, '其他歌单同步不能清理已保留的文件');
+  assert.equal(fs.readFileSync(path.join(root, 'notes.txt'), 'utf8'), 'unrelated-root-file');
+  assert.ok(fs.existsSync(db.filePath));
+  assert.equal(service.localPlaylists().length, 1);
+});
+
+test('根目录映射可以先创建，后续同名子目录仍能发现；逐曲删除只删除对应文件', async (t) => {
+  const { root, service } = await fixture(t);
+  const item = await service.mapPlaylist('1001', root);
+  const child = path.join(root, 'sets', '收藏节拍'); fs.mkdirSync(child, { recursive: true });
+  fs.writeFileSync(path.join(child, 'Friend - Saved Groove.mp3'), 'child-content');
+  fs.writeFileSync(path.join(root, 'unmanaged.mp3'), 'unmanaged');
+  await service.scanAll();
+  assert.equal(service.localPlaylists().length, 2);
+  await sync(service, [item.id]);
+  const current = service.localDetail(item.id);
+  await service.saveTrackChoices(item.id, current.revision, [{ id: '502', action: 'remove', enabled: true }]);
+  await sync(service, [item.id]);
+  assert.equal(fs.existsSync(path.join(root, 'Demo Unit - Last Train [502].mp3')), false);
+  assert.equal(fs.readFileSync(path.join(root, 'unmanaged.mp3'), 'utf8'), 'unmanaged');
+  assert.equal(fs.readFileSync(path.join(child, 'Friend - Saved Groove.mp3'), 'utf8'), 'child-content');
+  assert.ok(fs.existsSync(path.join(root, '.cloudmusic')));
+});
+
+test('根目录映射迁移仅迁移已管理歌曲，保留原音乐库的无关文件和目录', async (t) => {
+  const { root, service, db } = await fixture(t);
+  fs.writeFileSync(path.join(root, 'Test Artist - Neon Run.mp3'), 'root-original');
+  fs.writeFileSync(path.join(root, 'notes.txt'), 'keep notes');
+  fs.mkdirSync(path.join(root, 'unmanaged'));
+  fs.writeFileSync(path.join(root, 'unmanaged', 'sample.wav'), 'keep sample');
+  const item = await service.mapPlaylist('1001', root);
+  await sync(service, [item.id]);
+  const destination = fs.mkdtempSync(path.join(os.tmpdir(), 'ncmsync-mapping-migrate-'));
+  t.after(() => {
+    assert.ok(path.basename(destination).startsWith('ncmsync-mapping-migrate-'));
+    fs.rmSync(destination, { recursive: true, force: true });
+  });
+  fs.writeFileSync(path.join(destination, 'Test Artist - Neon Run.mp3'), 'existing-target');
+  await assert.rejects(service.changeLibrary(destination, true), /已存在同名歌曲/);
+  assert.equal(fs.readFileSync(path.join(root, 'Test Artist - Neon Run.mp3'), 'utf8').includes('root-original'), true);
+  assert.equal(fs.readFileSync(path.join(destination, 'Test Artist - Neon Run.mp3'), 'utf8'), 'existing-target');
+  fs.rmSync(path.join(destination, 'Test Artist - Neon Run.mp3'));
+  await service.changeLibrary(destination, true);
+  assert.equal(service.localDetail(item.id).folderPath, destination);
+  assert.equal(service.localDetail(item.id).trackCount, 2);
+  assert.equal(fs.existsSync(path.join(root, 'Test Artist - Neon Run.mp3')), false);
+  assert.equal(fs.existsSync(path.join(root, 'Demo Unit - Last Train [502].mp3')), false);
+  assert.equal(fs.readFileSync(path.join(root, 'notes.txt'), 'utf8'), 'keep notes');
+  assert.equal(fs.readFileSync(path.join(root, 'unmanaged', 'sample.wav'), 'utf8'), 'keep sample');
+  assert.ok(fs.existsSync(db.filePath));
 });
 
 test('目录联接不被递归读取，也不能作为手动映射和删除目标', async (t) => {

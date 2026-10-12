@@ -233,6 +233,8 @@ button.primary, .primary { border-color: #ff3457 !important; color: white !impor
 .mapping-root { overflow-wrap: anywhere; color: #b3c0d2; font-size: 11px; }
 .mapping-form .hint { color: #b3c0d2; font-size: 11px; }
 .mapping-form .modal-actions { margin: 20px -22px 0; }
+.use-library-folder { padding: 7px 12px; border: 1px solid #41516a; border-radius: 6px; background: #19273b; color: #dce5f3; cursor: pointer; font-size: 11px; }
+.use-library-folder:hover:not(:disabled) { background: #293a52; }
 .editor-toolbar button:focus-visible, .track-actions button:focus-visible, .mapping-link:focus-visible, .map-online-button:focus-visible, .mapping-form :focus-visible { outline: 2px solid #ff7890; outline-offset: 2px; }
 .track-pagination { min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 7px 14px; border-top: 1px solid #29364a; background: #0e1726; color: #77879c; font-size: 9px; }
 .track-pagination button { min-width: 66px; height: 27px; border: 1px solid #35445a; border-radius: 7px; color: #b5c0ce; background: #172236; cursor: pointer; }

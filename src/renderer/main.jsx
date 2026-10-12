@@ -155,15 +155,19 @@ function App() {
     await action('pause-local', () => api.pauseLocal([...localSelected], shouldPause), shouldPause ? '歌单已暂停' : '歌单已恢复');
   }
   function confirmRemove(ids = [...localSelected]) {
+    const includesLibrary = data.local.some((row) => ids.includes(row.id) && row.libraryRoot);
+    const onlyLibrary = includesLibrary && ids.length === 1;
     const remove = async (dontAsk = false) => {
       if (dontAsk) await api.saveSettings({ removeLocalDontAsk: true, scanHours: data.settings.scanHours, scanMinutes: data.settings.scanMinutes });
         await action('remove', () => api.removeLocal(ids), '本地歌单已移除');
         setLocalSelected(new Set()); setModal(null);
     };
     if (data.settings.removeLocalDontAsk) { remove(); return; }
-    setModal({ type: 'confirm', title: '删除本地歌单', dangerous: true, showDontAsk: true,
-      message: '“删除本地歌单”会删除所选歌单文件夹及其中的所有文件。如果想保留本地文件，请使用“暂停同步”。',
-      confirmText: '删除本地歌单', onConfirm: remove });
+    setModal({ type: 'confirm', title: onlyLibrary ? '移除歌单映射' : '删除本地歌单', dangerous: !onlyLibrary, showDontAsk: true,
+      message: onlyLibrary ? '移除音乐库根目录的歌单映射，保留音乐库中的全部文件。' : includesLibrary
+        ? '所选子文件夹歌单会删除目录与文件；音乐库根目录歌单只移除映射，保留根目录全部文件。'
+        : '“删除本地歌单”会删除所选歌单文件夹及其中的所有文件。如果想保留本地文件，请使用“暂停同步”。',
+      confirmText: onlyLibrary ? '移除映射' : '删除本地歌单', onConfirm: remove });
   }
   function confirmCancel() {
     if (data.settings.cancelDontAsk) action('cancel', () => api.cancelTask(data.settings.cancelDeleteDownloaded), '同步任务已取消');
@@ -267,7 +271,7 @@ function App() {
         </div>
         <div className="pane-actions">
           <button disabled={!localSelected.size || busy || data.task.active} onClick={pauseSelected}>{selectedAllPaused ? '▶ 恢复同步' : 'Ⅱ 暂停同步'}</button>
-          <button className="danger-ghost" disabled={!localSelected.size || busy} onClick={() => confirmRemove()}>− 删除本地歌单</button>
+          <button className="danger-ghost" disabled={!localSelected.size || busy} onClick={() => confirmRemove()}>{selectedLocalRows.length === 1 && selectedLocalRows[0].libraryRoot ? '− 移除映射' : '− 删除本地歌单'}</button>
         </div>
       </section>
     </main>
@@ -306,7 +310,7 @@ function ContextMenu({ x, y, item, data, onClose, onDetail, onSync, onPause, onR
     <button disabled={syncDisabled} onClick={click(onSync)}>⇄ 同步当前歌单</button><hr />
     {item.offline && <button onClick={click(onRedirect)}>↪ 重定向到在线歌单</button>}
     <button disabled={data.task.active} onClick={click(onPause)}>{item.paused ? '▶ 恢复同步' : 'Ⅱ 暂停同步'}</button>
-    <button className="danger" onClick={click(onRemove)}>− 删除本地歌单</button>
+    <button className="danger" onClick={click(onRemove)}>{item.libraryRoot ? '− 移除映射（保留文件）' : '− 删除本地歌单'}</button>
   </div>;
 }
 

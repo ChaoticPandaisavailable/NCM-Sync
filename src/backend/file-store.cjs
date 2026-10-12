@@ -14,14 +14,16 @@ class FileStore {
   }
 
   playlistPath(folderName) {
-    const target = path.resolve(this.rootPath, String(folderName || ''));
+    const name = String(folderName || '').trim();
+    if (!name) throw new Error('请选择音乐库内的文件夹');
+    const target = path.resolve(this.rootPath, name);
     const relative = path.relative(this.rootPath, target);
     const first = relative.split(path.sep)[0].toLowerCase();
-    if (!relative || !isPathInside(this.rootPath, target) || ['songs', '.cloudmusic'].includes(first)) {
+    if (!isPathInside(this.rootPath, target) || ['songs', '.cloudmusic'].includes(first)) {
       throw new Error('歌单目录必须位于音乐库内，且不能使用实体库或应用数据目录');
     }
     let current = this.rootPath;
-    for (const part of relative.split(path.sep)) {
+    for (const part of relative.split(path.sep).filter(Boolean)) {
       current = path.join(current, part);
       let stat;
       try { stat = fs.lstatSync(current); }
@@ -31,7 +33,9 @@ class FileStore {
     return target;
   }
 
-  relativePlaylistPath(folderPath) { return path.relative(this.rootPath, this.playlistPath(folderPath)); }
+  relativePlaylistPath(folderPath) { return path.relative(this.rootPath, this.playlistPath(folderPath)) || '.'; }
+
+  isLibraryFolder(folderName) { return path.relative(this.rootPath, this.playlistPath(folderName)) === ''; }
 
   async listPlaylistFolders() {
     if (!fs.existsSync(this.rootPath)) return [];
@@ -55,7 +59,10 @@ class FileStore {
 
   ensurePlaylistFolder(folderName) {
     const folderPath = this.playlistPath(folderName);
-    if (!isPathInside(this.rootPath, folderPath) || folderPath === this.rootPath) throw new Error('歌单目录不安全');
+    if (folderPath === this.rootPath) {
+      if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) throw new Error('音乐库目录不存在');
+      return folderPath;
+    }
     fs.mkdirSync(folderPath, { recursive: true });
     return folderPath;
   }
@@ -191,6 +198,7 @@ class FileStore {
 
   async renamePlaylistFolder(oldName, newName) {
     const from = this.playlistPath(oldName);
+    if (from === this.rootPath) throw new Error('音乐库根目录不能随歌单重命名');
     const to = this.playlistPath(path.join(path.dirname(oldName), sanitizeName(newName)));
     if (!isPathInside(this.rootPath, from) || !isPathInside(this.rootPath, to)) throw new Error('目录名称不安全');
     if (fs.existsSync(to)) throw new Error('目标文件夹已存在');
@@ -235,8 +243,17 @@ class FileStore {
     if (isPathInside(this.rootPath, targetStore.rootPath) || isPathInside(targetStore.rootPath, this.rootPath)) {
       throw new Error('新旧音乐库位置不能互相嵌套');
     }
+    const rootRelations = playlistTracks.filter((relation) => this.isLibraryFolder(relation.folder_name));
+    for (const relation of rootRelations) {
+      const source = path.join(this.rootPath, relation.filename);
+      const target = path.join(targetStore.rootPath, relation.filename);
+      if (path.basename(relation.filename) !== relation.filename || !isPathInside(this.rootPath, source) || !isPathInside(targetStore.rootPath, target)) throw new Error('歌曲路径不安全');
+      if (fs.existsSync(target)) throw new Error(`目标音乐库中已存在同名歌曲：${relation.filename}`);
+      if (fs.existsSync(source) && fs.lstatSync(source).isSymbolicLink()) throw new Error('歌曲路径不能是符号链接');
+    }
     await moveDirectory(this.songsPath, targetStore.songsPath);
     for (const playlist of playlists) {
+      if (this.isLibraryFolder(playlist.folder_name)) continue;
       await moveDirectory(this.playlistPath(playlist.folder_name), targetStore.playlistPath(playlist.folder_name));
     }
     const songPaths = new Map(songs.map((song) => [song.track_id, path.join(targetStore.songsPath, path.basename(song.entity_path))]));
@@ -245,8 +262,10 @@ class FileStore {
       if (!entityPath || !fs.existsSync(entityPath)) continue;
       const folderPath = targetStore.ensurePlaylistFolder(relation.folder_name);
       const linkPath = path.join(folderPath, relation.filename);
-      await fsp.rm(linkPath, { force: true });
+      const inRoot = this.isLibraryFolder(relation.folder_name);
+      if (!inRoot) await fsp.rm(linkPath, { force: true });
       await targetStore.createPlaylistLink(entityPath, relation.folder_name, relation.filename);
+      if (inRoot) await this.removePlaylistLink(relation.folder_name, relation.filename);
     }
   }
 

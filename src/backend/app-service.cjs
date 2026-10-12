@@ -157,7 +157,8 @@ class AppService {
     if (row.paused) status = 'paused';
     else if (row.offline) status = 'offline';
     else if (needsSync || row.pending_name || row.error) status = 'pending';
-    const basename = path.basename(row.folder_name);
+    const libraryRoot = row.folder_name === '.';
+    const basename = libraryRoot ? '音乐库根目录' : path.basename(row.folder_name);
     const displayName = sanitizeName(row.name) === basename ? row.name : `${row.name}（${basename}）`;
     let folderPath;
     let pathError = '';
@@ -171,7 +172,7 @@ class AppService {
       trackCount: row.track_count, paused: Boolean(row.paused), offline: Boolean(row.offline || pathError),
       previousName: row.previous_name, pendingName: row.pending_name,
       added, removed, existing, addedCount: added.length, removedCount: removed.length, existingCount: existing.length,
-      needsSync, revision, customMapping: Boolean(row.custom_mapping),
+      needsSync, revision, customMapping: Boolean(row.custom_mapping), libraryRoot,
       lastSyncAt: row.last_sync_at, lastScanAt: row.last_scan_at,
       syncProgress: row.sync_progress, error: pathError || row.error, status
     };
@@ -225,9 +226,16 @@ class AppService {
     for (const row of this.db.all('SELECT id,folder_name FROM local_playlists')) {
       if (row.id === exceptId) continue;
       const other = path.resolve(this.rootPath, row.folder_name);
-      if (pathsOverlap(target, other)) throw new Error('目标目录与其他歌单目录重复或互相嵌套，请选择独立文件夹');
+      if (this.mappingPathsOverlap(target, other)) throw new Error('目标目录与其他歌单目录重复或互相嵌套，请选择独立文件夹');
     }
     return target;
+  }
+
+  mappingPathsOverlap(left, right) {
+    if (path.relative(left, right) === '') return true;
+    // A root mapping owns direct files only; its subfolders remain independent.
+    if (path.relative(this.rootPath, left) === '' || path.relative(this.rootPath, right) === '') return false;
+    return pathsOverlap(left, right);
   }
 
   async mapPlaylist(onlineId, folderPath, localId = '') {
@@ -383,13 +391,14 @@ class AppService {
   }
 
   resolvePlaylistFolder(online, folders, localRows, local, allowBase = true) {
+    if (local?.custom_mapping && this.fileStore.isLibraryFolder(local.folder_name)) return { folder: '.' };
     const available = folders.byPath;
     if (local?.folder_name && available.has(local.folder_name.toLowerCase())) return { folder: available.get(local.folder_name.toLowerCase()) };
     if (local?.custom_mapping) return {};
     const base = sanitizeName(online.name);
     const names = [`${base} [${online.id}]`, ...(allowBase ? [base] : [])];
     const groups = names.map((name) => (folders.byName.get(name.toLowerCase()) || [])
-      .filter((folder) => !localRows.some((row) => row.id !== local?.id && pathsOverlap(this.fileStore.playlistPath(folder), path.resolve(this.rootPath, row.folder_name)))));
+      .filter((folder) => !localRows.some((row) => row.id !== local?.id && this.mappingPathsOverlap(this.fileStore.playlistPath(folder), path.resolve(this.rootPath, row.folder_name)))));
     for (const matches of groups) {
       const direct = matches.find((folder) => path.dirname(folder) === '.');
       if (direct) return { folder: direct };
@@ -812,9 +821,8 @@ class AppService {
 
   async pruneOrphanedSongs(trackIds = []) {
     const ids = [...new Set(trackIds.map(String).filter(Boolean))];
-    const songs = ids.length
-      ? this.db.all(`SELECT * FROM songs WHERE track_id IN (${ids.map(() => '?').join(',')})`, ids)
-      : this.db.all('SELECT * FROM songs');
+    if (!ids.length) return;
+    const songs = this.db.all(`SELECT * FROM songs WHERE track_id IN (${ids.map(() => '?').join(',')})`, ids);
     for (const song of songs) {
       const references = this.db.get('SELECT COUNT(*) AS count FROM playlist_tracks WHERE track_id=?', [song.track_id]);
       if (Number(references?.count) > 0) continue;
@@ -842,8 +850,10 @@ class AppService {
     for (const id of ids || []) {
       const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [id]);
       if (!row) continue;
-      removedTrackIds.push(...this.db.all('SELECT track_id FROM playlist_tracks WHERE playlist_id=?', [id]).map((track) => track.track_id));
-      await this.fileStore.removePlaylistFolder(row.folder_name);
+      if (!this.fileStore.isLibraryFolder(row.folder_name)) {
+        removedTrackIds.push(...this.db.all('SELECT track_id FROM playlist_tracks WHERE playlist_id=?', [id]).map((track) => track.track_id));
+        await this.fileStore.removePlaylistFolder(row.folder_name);
+      }
       this.db.run('DELETE FROM playlist_tracks WHERE playlist_id=?', [id]);
       this.db.run('DELETE FROM local_playlists WHERE id=?', [id]);
     }
@@ -858,7 +868,7 @@ class AppService {
     if (!row || !online) throw new Error('歌单不存在');
     const conflict = this.db.get('SELECT id FROM local_playlists WHERE online_id=? AND id<>?', [String(onlineId), id]);
     if (conflict) throw new Error('该在线歌单已经在本地列表中');
-    const pendingName = row.folder_name === sanitizeName(online.name) ? null : online.name;
+    const pendingName = this.fileStore.isLibraryFolder(row.folder_name) || row.folder_name === sanitizeName(online.name) ? null : online.name;
     this.db.run('UPDATE local_playlists SET online_id=?,name=?,previous_name=?,pending_name=?,offline=0,error=NULL WHERE id=?', [String(onlineId), online.name, row.name, pendingName, id]);
     const detail = await this.netease.getPlaylist(onlineId);
     this.db.run('DELETE FROM track_choices WHERE playlist_id=?', [id]);

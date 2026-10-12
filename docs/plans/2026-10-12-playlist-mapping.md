@@ -40,3 +40,11 @@
 - Persist song participation separately from add/remove/keep actions. Unchecked tracks must not download, delete, or receive cover updates. Support batch selection undo and redo.
 - Add list refresh, playlist and song checkboxes, selection counts, local/missing colors, and a restrained interface.
 - Verify selection isolation, directory absence, persistence, colors and batch undo in integration and Electron tests; update the original installed app after packaging checks pass.
+
+## 6. Mapping to the library folder
+
+- Add “使用音乐库文件夹” to the mapping dialog. Persist an explicit root mapping as `.`; empty input remains invalid.
+- A root mapping owns direct audio files and can coexist with independent subfolder mappings. Only one online playlist may map to the root.
+- Removing a root playlist removes its mapping and preserves root files; file-level removal remains explicit. Reject root-folder renames.
+- Migration moves only managed root song links and entities, leaving unrelated root files and directories intact. Check target filename collisions before moving files.
+- Cover root mapping, child discovery, scoped sync, removal, migration and the dialog shortcut with mock tests, then update the existing desktop installation.
