@@ -6,6 +6,7 @@ const { CancelledError } = require('./task-manager.cjs');
 const { FileStore } = require('./file-store.cjs');
 const { writeAudioTags } = require('./tag-writer.cjs');
 const { buildSyncPlan } = require('./sync-plan.cjs');
+const { exportMp3, validateMp3Bitrate } = require('./mp3-export.cjs');
 
 const MAX_TRACK_ATTEMPTS = 2;
 
@@ -148,11 +149,18 @@ class AppService {
         rows: rows.map((row) => this.mapLocal(row, tracks.get(row.id) || [], choices.get(row.id) || [], deleteRemoved)) };
     }
     if (!summary) return this.localCache.rows;
-    return this.localCache.rows.map(({ added, removed, existing, ...row }) => row);
+    return this.localCache.rows.map(({ added, removed, existing, onlineTracks, localTracks, ...row }) => row);
   }
 
   mapLocal(row, trackRows, choices, deleteRemoved) {
-    const { added, removed, existing, needsSync } = buildSyncPlan(row, trackRows.map(dbTrack), choices, deleteRemoved);
+    const localTracks = trackRows.map(dbTrack);
+    const { added, removed, existing, needsSync } = buildSyncPlan(row, localTracks, choices, deleteRemoved);
+    const decisions = new Map([...added, ...removed, ...existing].map((track) => [track.id, track]));
+    const snapshot = parseJson(row.online_tracks_json, []);
+    const removedIds = new Set(parseJson(row.removed_json, []).map((track) => String(track.id)));
+    const onlineTracks = [...new Map((snapshot.length ? snapshot : [...parseJson(row.added_json, []), ...parseJson(row.existing_json, [])]
+      .filter((track) => !removedIds.has(String(track.id)))).map((track) => [String(track.id), track])).values()]
+      .map((track) => ({ ...decisions.get(String(track.id)), ...track, id: String(track.id) }));
     let status = 'synced';
     if (row.paused) status = 'paused';
     else if (row.offline) status = 'offline';
@@ -164,7 +172,7 @@ class AppService {
     let pathError = '';
     try { folderPath = this.fileStore.playlistPath(row.folder_name); }
     catch (error) { folderPath = path.resolve(this.rootPath, row.folder_name); pathError = error.message; status = 'offline'; }
-    const revision = crypto.createHash('sha256').update(JSON.stringify([row.online_id, row.folder_name, row.added_json, row.removed_json, trackRows, choices, deleteRemoved])).digest('hex');
+    const revision = crypto.createHash('sha256').update(JSON.stringify([row.online_id, row.folder_name, row.added_json, row.removed_json, row.online_tracks_json, trackRows, choices, deleteRemoved])).digest('hex');
     return {
       id: row.id, onlineId: row.online_id, name: row.name, folderName: row.folder_name,
       displayName,
@@ -172,6 +180,7 @@ class AppService {
       trackCount: row.track_count, paused: Boolean(row.paused), offline: Boolean(row.offline || pathError),
       previousName: row.previous_name, pendingName: row.pending_name,
       added, removed, existing, addedCount: added.length, removedCount: removed.length, existingCount: existing.length,
+      onlineTracks, localTracks: localTracks.map((track) => decisions.get(track.id)),
       needsSync, revision, customMapping: Boolean(row.custom_mapping), libraryRoot,
       lastSyncAt: row.last_sync_at, lastScanAt: row.last_scan_at,
       syncProgress: row.sync_progress, error: pathError || row.error, status
@@ -507,9 +516,9 @@ class AppService {
       } catch { /* 保留提示，让用户处理同名冲突 */ }
     }
     this.db.run(`UPDATE local_playlists SET name=?,previous_name=?,pending_name=?,offline=0,error=NULL,
-      folder_name=?,added_json=?,removed_json=?,existing_json=?,track_count=?,last_scan_at=? WHERE id=?`, [
+      folder_name=?,added_json=?,removed_json=?,existing_json=?,online_tracks_json=?,track_count=?,last_scan_at=? WHERE id=?`, [
       detail.name, nameChanged ? row.name : row.previous_name, pendingName, folderName,
-      JSON.stringify(added), JSON.stringify(removed), JSON.stringify(existing), current.length, Date.now(), localId
+      JSON.stringify(added), JSON.stringify(removed), JSON.stringify(existing), JSON.stringify(detail.tracks), current.length, Date.now(), localId
     ]);
     return { added, removed, existing };
   }
@@ -583,6 +592,7 @@ class AppService {
       throw new Error(scope.size ? '所选歌单没有可用映射，请选择现有本地文件夹' : '请先勾选需要同步的在线歌单');
     }
     const control = this.tasks.begin(rows.length, source, this.downloadConcurrency);
+    control.mp3Bitrate = this.db.getSettings().mp3Bitrate;
     this.db.setSettings({ interruptedTask: true });
     this.syncPromise = this.runSync(rows, control).catch(() => {});
     return this.tasks.getState();
@@ -783,6 +793,7 @@ class AppService {
       if (downloaded.encrypted) {
         downloaded = await this.fileStore.finishNcm(track, downloaded.ncmPath);
       }
+      downloaded = await exportMp3(downloaded, control.mp3Bitrate ?? this.db.getSettings().mp3Bitrate, control);
       const coverEmbedded = await this.writeTrackTags(downloaded.entityPath, downloaded.extension, track, { ...downloaded, cover: downloaded.cover || null });
       downloaded.size = fs.statSync(downloaded.entityPath).size;
       this.db.run(`INSERT INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,cover_url,cover_embedded,created_at)
@@ -924,7 +935,7 @@ class AppService {
       this.db.transaction(() => {
         this.db.db.run('DELETE FROM playlist_tracks');
         this.db.db.run('DELETE FROM songs');
-        this.db.db.run(`UPDATE local_playlists SET track_count=0,added_json='[]',removed_json='[]',existing_json='[]',
+        this.db.db.run(`UPDATE local_playlists SET track_count=0,added_json='[]',removed_json='[]',existing_json='[]',online_tracks_json='[]',
           last_scan_at=NULL,last_sync_at=NULL,offline=1,sync_progress=NULL,error='音乐库位置已更改，请选择现有目录重新映射'`);
       });
     }
@@ -949,10 +960,11 @@ class AppService {
 
   updateSettings(values) {
     const current = this.db.getSettings();
-    const allowed = ['autoScan','autoSync','realtimeSync','scanHours','scanMinutes','deleteRemoved','downloadConcurrency','renamePolicy','cancelDeleteDownloaded','cancelDontAsk','removeLocalDontAsk','cookie'];
+    const allowed = ['autoScan','autoSync','realtimeSync','scanHours','scanMinutes','deleteRemoved','downloadConcurrency','mp3Bitrate','renamePolicy','cancelDeleteDownloaded','cancelDontAsk','removeLocalDontAsk','cookie'];
     const next = {};
     for (const key of allowed) if (Object.hasOwn(values, key)) next[key] = values[key];
     if (next.cookie === '••••••••') delete next.cookie;
+    if (Object.hasOwn(next, 'mp3Bitrate')) next.mp3Bitrate = validateMp3Bitrate(next.mp3Bitrate);
     const interval = normalizeInterval(next.scanHours ?? current.scanHours, next.scanMinutes ?? current.scanMinutes);
     next.scanHours = interval.hours; next.scanMinutes = interval.minutes;
     if (Object.hasOwn(next, 'downloadConcurrency')) {

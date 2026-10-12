@@ -23,7 +23,7 @@
 ## 3. Interface and performance
 
 - Show full paths and mapping entry points in `src/renderer/main.jsx`.
-- Create a paginated three-column editor with drag/drop, equivalent buttons, undo/redo and keyboard shortcuts. Saving only changes the plan; syncing applies it.
+- Create a paginated left online / right local comparison with drag/drop, checkboxes, explicit deletion, undo/redo and keyboard shortcuts. Applying saves the complete plan; syncing executes file operations.
 - Poll summaries rather than full song arrays; fetch details when opened. Batch relationship reads and use sets for diff membership.
 - Add Electron E2E coverage for mapping, drag/drop, undo, save and scoped sync.
 
@@ -48,3 +48,11 @@
 - Removing a root playlist removes its mapping and preserves root files; file-level removal remains explicit. Reject root-folder renames.
 - Migration moves only managed root song links and entities, leaving unrelated root files and directories intact. Check target filename collisions before moving files.
 - Cover root mapping, child discovery, scoped sync, removal, migration and the dialog shortcut with mock tests, then update the existing desktop installation.
+
+## 7. Stable comparison and MP3 export
+
+- Replace the action lanes with left online / right local lists. Keep rows stable, render 32px lines, use distinct green/amber backgrounds, checkbox all-select with indeterminate state, and paginated search.
+- Persist the complete choice map on Apply, including every unchecked song. Store full online snapshots so ignored or deleted online songs remain visible; omit snapshots from summary polling.
+- Retain explicit local deletion and batch undo/redo. Drag between the comparison columns changes participation without moving files.
+- Add source preservation and 128/192/256/320 kbps MP3 settings. Bundle FFmpeg, capture bitrate at task start, convert only newly downloaded files before tagging/linking, terminate on cancellation and clean temporary output.
+- Verify real MP3 frame bitrates, failure/cancellation cleanup, source preservation, setting persistence, unchecked states after restart, dense layout and 4867-song pagination. Package and update the original desktop installation with a verified encoder and backup.

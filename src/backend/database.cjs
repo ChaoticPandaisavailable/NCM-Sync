@@ -86,6 +86,7 @@ class Database {
     this.migrateSongs();
     const localColumns = new Set(this.all('PRAGMA table_info(local_playlists)').map((row) => row.name));
     if (!localColumns.has('custom_mapping')) this.db.run('ALTER TABLE local_playlists ADD COLUMN custom_mapping INTEGER NOT NULL DEFAULT 0');
+    if (!localColumns.has('online_tracks_json')) this.db.run("ALTER TABLE local_playlists ADD COLUMN online_tracks_json TEXT NOT NULL DEFAULT '[]'");
     const choiceColumns = new Set(this.all('PRAGMA table_info(track_choices)').map((row) => row.name));
     if (!choiceColumns.has('enabled')) {
       this.db.run('ALTER TABLE track_choices ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
@@ -94,7 +95,7 @@ class Database {
     }
     const defaults = {
       userId: '', initialized: false, autoScan: false, autoSync: false, realtimeSync: false,
-      scanHours: 1, scanMinutes: 0, deleteRemoved: false, downloadConcurrency: 4,
+      scanHours: 1, scanMinutes: 0, deleteRemoved: false, downloadConcurrency: 4, mp3Bitrate: 0,
       renamePolicy: 'ask', cancelDeleteDownloaded: false,
       cancelDontAsk: false, removeLocalDontAsk: false, cookie: '', interruptedTask: false,
       lastGlobalStatus: '', libraryPath: '', lastScanAt: null, lastSyncAt: null, syncPlaylistIds: []

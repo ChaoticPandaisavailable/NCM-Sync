@@ -175,10 +175,10 @@ test('NCM Sync 首次设置、扫描、排序、同步和安全删除完整桌�
     await expect(page.locator('.local-pane .status-badge.synced')).toHaveText('同步');
 
     await page.locator('.local-pane tbody tr').first().dblclick();
-    await expect(page.locator('.changes-grid > section')).toHaveCount(3);
-    await expect(page.locator('.changes-grid')).toContainText('Neon Run');
-    await expect(page.locator('.changes-grid')).toContainText('Test Artist');
-    const sectionTops = await page.locator('.changes-grid > section').evaluateAll((sections) => sections.map((section) => Math.round(section.getBoundingClientRect().top)));
+    await expect(page.locator('.song-comparison > section')).toHaveCount(2);
+    await expect(page.getByTestId('songs-online')).toContainText('Neon Run');
+    await expect(page.getByTestId('songs-local')).toContainText('Test Artist');
+    const sectionTops = await page.locator('.song-comparison > section').evaluateAll((sections) => sections.map((section) => Math.round(section.getBoundingClientRect().top)));
     expect(new Set(sectionTops).size).toBe(1);
     fs.mkdirSync(path.join(projectRoot, 'test-results'), { recursive: true });
     await page.screenshot({ path: path.join(projectRoot, 'test-results', 'cloudmusic-detail-e2e.png'), fullPage: true });

@@ -186,8 +186,11 @@ class FileStore {
       await fsp.rename(partialPath, ncmPath);
       return { encrypted: true, ncmPath, created: true };
     }
-    await fsp.rename(partialPath, finalPath);
-    return { entityPath: finalPath, filename, extension: 'mp3', size, created: true };
+    const extension = first.subarray(0, 4).toString('ascii') === 'fLaC' ? 'flac' : 'mp3';
+    const audioFilename = trackFilename(track, extension);
+    const audioPath = path.join(this.songsPath, audioFilename);
+    await fsp.rename(partialPath, audioPath);
+    return { entityPath: audioPath, filename: audioFilename, extension, size, created: true };
   }
 
   async removePlaylistFolder(folderName) {

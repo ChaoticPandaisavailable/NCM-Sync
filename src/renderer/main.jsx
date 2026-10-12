@@ -425,6 +425,7 @@ function SettingsModal({ data, busy, close, save }) {
     <div className="inline-fields"><label>周期（小时）<input type="number" min="0" value={form.scanHours} onChange={(event) => update('scanHours', event.target.value)} /></label><label>分钟<input type="number" min="0" value={form.scanMinutes} onChange={(event) => update('scanMinutes', event.target.value)} /></label></div>
     <Toggle label="扫描到更新后自动同步" checked={form.autoSync} onChange={(value) => update('autoSync', value)} />
     <label>下载并发数（同时下载的歌曲数）<select value={form.downloadConcurrency ?? 4} onChange={(event) => update('downloadConcurrency', Number(event.target.value))}>{[1,2,3,4,5,6,7,8].map((n) => <option key={n} value={n}>{n} 路</option>)}</select></label>
+    <label>MP3 导出码率<select value={form.mp3Bitrate ?? 0} onChange={(event) => update('mp3Bitrate', Number(event.target.value))}><option value={0}>保留源音质（MP3 / FLAC）</option>{[128,192,256,320].map((rate) => <option key={rate} value={rate}>{rate} kbps</option>)}</select><small className="hint">固定码率仅用于之后新下载的歌曲；本地已有和未勾选的歌曲保持原样。提高码率不会提升音源音质。</small></label>
     <Toggle label="同步时删除在线歌单中已减少的歌曲" checked={form.deleteRemoved} onChange={(value) => update('deleteRemoved', value)} />
     <label>在线歌单改名时<select value={form.renamePolicy || 'ask'} onChange={(event) => update('renamePolicy', event.target.value)}><option value="ask">提示后手动同步文件夹名</option><option value="auto">自动同步本地文件夹名</option></select></label>
     <Toggle label="取消任务时删除本次下载内容" checked={form.cancelDeleteDownloaded} onChange={(value) => update('cancelDeleteDownloaded', value)} />

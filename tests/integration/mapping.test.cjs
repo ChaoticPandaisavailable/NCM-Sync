@@ -306,6 +306,8 @@ test('轮询摘要不携带数千首歌曲，详情按需读取且静态轮询�
   const summary = service.bootstrap({ summary: true });
   assert.equal(summary.local[0].addedCount, 4867);
   assert.equal(Object.hasOwn(summary.local[0], 'added'), false);
+  assert.equal(Object.hasOwn(summary.local[0], 'onlineTracks'), false);
+  assert.equal(Object.hasOwn(summary.local[0], 'localTracks'), false);
   assert.ok(JSON.stringify(summary).length < JSON.stringify(full).length / 20);
   const originalAll = db.all.bind(db); let reads = 0;
   db.all = (...args) => { reads += 1; return originalAll(...args); };

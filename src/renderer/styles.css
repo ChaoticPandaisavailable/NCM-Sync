@@ -346,3 +346,51 @@ tbody tr.sync-selected { background: rgba(225, 79, 105, .035); }
 .playlist-editor .modal-actions { border-top: 1px solid var(--line); padding-top: 12px; flex-wrap: wrap; }
 @media (max-width: 1240px) { .workspace { padding: 14px; gap: 14px; grid-template-columns: minmax(350px, 1fr) 144px minmax(370px, 1.05fr); } .pane { padding: 16px; } .playlist-selection-toolbar { flex-wrap: wrap; } .online-footer { flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* Stable online/local columns with dense, single-line song rows. */
+.dialog.extra-wide:has(.comparison-editor) { width: min(1360px, calc(100vw - 48px)); height: calc(100vh - 64px); max-height: calc(100vh - 64px); }
+.dialog:has(.comparison-editor) > header { padding: 14px 18px 12px; }
+.comparison-editor { flex: 1; min-height: 0; }
+.comparison-toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; flex: none; }
+.comparison-all { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-size: 11px; color: #d5deec; cursor: pointer; }
+.comparison-all .selection-checkbox { width: 15px; height: 15px; }
+.comparison-totals { font-size: 11px; color: #a5b3c7; white-space: nowrap; }
+.comparison-search { margin-left: auto; min-width: 100px; width: 210px; }
+.comparison-search input { width: 100%; height: 28px; padding: 0 10px; border: 1px solid #354155; border-radius: 5px; background: #0e1520; color: #e6edf7; font-size: 11px; }
+.comparison-toolbar button, .comparison-footer button { min-height: 28px; padding: 5px 10px; border: 1px solid #354155; border-radius: 5px; background: #192433; color: #dce5f3; cursor: pointer; font-size: 11px; flex: none; }
+.comparison-legend { padding: 0 16px 10px; display: flex; align-items: center; gap: 14px; font-size: 10px; color: #9eacc0; }
+.comparison-legend .local-swatch, .comparison-legend .missing-swatch { padding: 4px 8px; border-radius: 4px; border: 1px solid; }
+.comparison-legend .local-swatch { background: #173c35; border-color: #2a6556; color: #b7ead7; }
+.comparison-legend .missing-swatch { background: #473322; border-color: #795736; color: #f6d19c; }
+.comparison-notice { padding: 6px 16px; margin: 0; color: #e9bd79; font-size: 11px; }
+.song-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); flex: 1; min-height: 0; border-top: 1px solid #354155; }
+.comparison-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.comparison-column + .comparison-column { border-left: 1px solid #354155; }
+.comparison-column > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; flex: none; background: #17202c; }
+.comparison-column h4 { font-size: 13px; font-weight: 600; margin: 0; color: #e6edf7; }
+.comparison-column h4 b { font-size: 11px; font-weight: 400; margin-left: 7px; color: #a8b7cb; }
+.comparison-column.drag-over { outline: 2px solid #ee8ca1; outline-offset: -2px; }
+.comparison-list-frame { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.comparison-song-list { flex: 1; min-height: 0; overflow: auto; scrollbar-color: #55677d #121a27; }
+.comparison-list-labels, .comparison-song-row { display: grid; grid-template-columns: 15px 23px minmax(90px, 1fr) minmax(80px, .55fr) 34px 72px; align-items: center; gap: 7px; padding: 0 10px; }
+.comparison-list-labels.local, .comparison-song-row.local { grid-template-columns: 15px 23px minmax(90px, 1fr) minmax(80px, .55fr) 34px 42px; }
+.comparison-list-labels { height: 27px; min-height: 27px; font-size: 10px; color: #9aa9be; background: #111b2a; border-bottom: 1px solid #354155; }
+.comparison-song-row { height: 32px; min-height: 32px; border-bottom: 1px solid rgba(235, 244, 255, .08); cursor: grab; user-select: none; }
+.comparison-song-row.is-local { background: #173c35; color: #e8fff5; }
+.comparison-song-row.is-missing { background: #473322; color: #fff2d9; }
+.comparison-song-row.is-local:hover { background: #215347; }
+.comparison-song-row.is-missing:hover { background: #62472d; }
+.comparison-song-row.scheduled-removal { background: #542c39; color: #ffd8e2; }
+.comparison-song-row strong, .comparison-song-artist { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.comparison-song-row strong { font-size: 11px; font-weight: 500; }
+.comparison-song-row .selection-checkbox { width: 14px; height: 14px; }
+.comparison-song-artist { font-size: 10px; color: inherit; opacity: .85; }
+.comparison-song-number, .comparison-song-duration { font-size: 10px; font-variant-numeric: tabular-nums; color: inherit; opacity: .65; }
+.comparison-song-state { font-size: 9px; color: inherit; white-space: nowrap; text-align: right; }
+.comparison-remove { height: 23px; min-height: 23px; padding: 0 5px; background: rgba(10, 17, 27, .3); border: 1px solid rgba(223, 237, 250, .2); border-radius: 4px; color: inherit; font-size: 9px; cursor: pointer; }
+.comparison-song-row[data-selected=false] strong { font-weight: 400; }
+.comparison-footer { flex: none; border-top: 1px solid #354155; padding: 10px 16px; display: flex; align-items: center; gap: 8px; }
+.comparison-status { flex: 1; font-size: 11px; color: #b8c5d8; line-height: 1.6; }
+.comparison-status small { display: block; font-size: 10px; color: #b6a085; }
+.comparison-list-frame .track-pagination { min-height: 34px; padding: 4px 10px; }
+@media (max-width: 1180px) { .comparison-toolbar { gap: 8px; } .comparison-search { width: 150px; } .comparison-list-labels, .comparison-song-row { gap: 5px; padding: 0 8px; } }

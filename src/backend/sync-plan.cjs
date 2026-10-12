@@ -1,7 +1,8 @@
 const { parseJson } = require('./utils.cjs');
 
 function buildSyncPlan(row, localTracks, choices, deleteRemoved) {
-  const candidates = new Map(parseJson(row.added_json, []).map((track) => [String(track.id), { ...track, local: false }]));
+  const candidates = new Map([...parseJson(row.online_tracks_json, []), ...parseJson(row.added_json, [])]
+    .map((track) => [String(track.id), { ...track, local: false }]));
   const remoteRemoved = new Set(parseJson(row.removed_json, []).map((track) => String(track.id)));
   for (const track of localTracks) candidates.set(String(track.id), { ...track, local: true });
   const decisions = new Map(choices.map((choice) => [String(choice.track_id), choice]));
