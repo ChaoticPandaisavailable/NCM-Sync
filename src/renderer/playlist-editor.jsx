@@ -162,8 +162,8 @@ const ComparisonSongRow = memo(function ComparisonSongRow({ track, index, side, 
         onClick={(event) => { if (!event.target.closest('button,input')) chooseRow(track, index, event.shiftKey); }}
         onDragStart={(event) => { if (event.target.closest('input,button')) return event.preventDefault(); event.dataTransfer.setData(dragType, JSON.stringify({ id: track.id, playlistId, side })); event.dataTransfer.effectAllowed = 'move'; }}>
         <input type="checkbox" className="selection-checkbox" aria-label={`${side === 'online' ? '在线歌曲' : '已有歌曲'}：${track.name}`} checked={chosen} disabled={blocked} draggable={false} onMouseDown={(event) => event.stopPropagation()} onChange={() => {}} onClick={(event) => { event.stopPropagation(); chooseRow(track, index, event.shiftKey); }} />
-        <span className="comparison-song-number">{index + 1}</span><strong title={`${track.name}${track.remoteRemoved ? ' · 在线已移除' : ''}`}>{track.name}</strong>
-        <span className="comparison-song-artist" title={(track.artists || []).join(', ')}>{(track.artists || []).join(', ') || '未知艺术家'}</span><small className="comparison-song-duration">{duration(track.duration)}</small>
+        <span className="comparison-song-number">{index + 1}</span><strong title={`${track.filename || track.name}${track.remoteRemoved ? ' · 在线已移除' : ''}`}>{track.name}</strong>
+        <span className="comparison-song-artist" title={(track.artists || []).join(', ')}>{(track.artists || []).join(', ') || (track.localOnly ? '仅本地文件' : '未知艺术家')}</span><small className="comparison-song-duration">{track.localOnly && !track.duration ? '—' : duration(track.duration)}</small>
         {side === 'online' ? <small className="comparison-song-state">{state}</small> : <button className="comparison-remove" disabled={blocked} aria-label={`${track.name}：${deleting ? '留存' : '删除'}`} onClick={() => remove(track)}>{deleting ? '留存' : '删除'}</button>}
       </div>;
 });

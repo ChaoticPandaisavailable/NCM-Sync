@@ -33,6 +33,9 @@ class AppService {
     this.downloadConcurrency = Math.max(1, Math.min(8, Math.floor(configured) || 4));
     this.syncPromise = null;
     this.startupScanPromise = null;
+    this.localInventories = new Map();
+    this.localInventoryRevision = 0;
+    this.localInventoryCheckedAt = 0;
   }
 
   start() {
@@ -115,7 +118,8 @@ class AppService {
   }
 
   bootstrapRevision() {
-    return JSON.stringify([this.db.revision, this.rootPath, this.scanning, this.scanSource, this.scanStatus, this.tasks.getState()]);
+    this.refreshLocalInventories();
+    return JSON.stringify([this.db.revision, this.localInventoryRevision, this.rootPath, this.scanning, this.scanSource, this.scanStatus, this.tasks.getState()]);
   }
 
   bootstrap({ summary = false } = {}) {
@@ -143,7 +147,8 @@ class AppService {
   }
 
   localPlaylists({ summary = false } = {}) {
-    if (this.localCache?.revision !== this.db.revision || this.localCache?.rootPath !== this.rootPath) {
+    this.refreshLocalInventories();
+    if (this.localCache?.revision !== this.db.revision || this.localCache?.rootPath !== this.rootPath || this.localCache?.inventoryRevision !== this.localInventoryRevision) {
       const tracks = groupBy(this.db.all(`SELECT pt.playlist_id,pt.track_id,pt.filename,s.name,s.artists,s.album,s.duration
         FROM playlist_tracks pt JOIN songs s ON s.track_id=pt.track_id`), 'playlist_id');
       const choices = groupBy(this.db.all('SELECT * FROM track_choices'), 'playlist_id');
@@ -153,21 +158,71 @@ class AppService {
       const entries = new Map();
       const mapped = rows.map((row) => {
         const trackRows = tracks.get(row.id) || []; const decisions = choices.get(row.id) || [];
+        const inventory = this.localInventories.get(row.id);
         const old = previous?.get(row.id);
-        const unchanged = old && old.deleteRemoved === deleteRemoved && sameSqlRows([old.row], [row])
+        const unchanged = old && old.inventory === inventory && old.deleteRemoved === deleteRemoved && sameSqlRows([old.row], [row])
           && sameSqlRows(old.tracks, trackRows) && sameSqlRows(old.choices, decisions);
-        const item = unchanged ? old.item : this.mapLocal(row, trackRows, decisions, deleteRemoved);
-        entries.set(row.id, { row, tracks: trackRows, choices: decisions, deleteRemoved, item });
+        const item = unchanged ? old.item : this.mapLocal(row, trackRows, decisions, deleteRemoved, inventory);
+        entries.set(row.id, { row, tracks: trackRows, choices: decisions, deleteRemoved, inventory, item });
         return item;
       });
-      this.localCache = { revision: this.db.revision, rootPath: this.rootPath, entries, rows: mapped };
+      this.localCache = { revision: this.db.revision, rootPath: this.rootPath, inventoryRevision: this.localInventoryRevision, entries, rows: mapped };
     }
     if (!summary) return this.localCache.rows;
     return this.localCache.rows.map(({ added, removed, existing, onlineTracks, localTracks, ...row }) => row);
   }
 
-  mapLocal(row, trackRows, choices, deleteRemoved) {
-    const localTracks = trackRows.map(dbTrack);
+  refreshLocalInventories(id) {
+    const now = Date.now();
+    const rowsChanged = this.localInventoryDbRevision !== this.db.revision || this.localInventoryRoot !== this.rootPath;
+    if (!id && !rowsChanged && now - this.localInventoryCheckedAt < 1_000) return;
+    const rows = id ? this.db.all('SELECT id,folder_name FROM local_playlists WHERE id=?', [id])
+      : this.db.all('SELECT id,folder_name FROM local_playlists');
+    for (const row of rows) {
+      const previous = this.localInventories.get(row.id);
+      // Progress changes do not require another directory read for every other playlist.
+      if (!id && previous?.rootPath === this.rootPath && previous.folderName === row.folder_name && now - previous.checkedAt < 1_000) continue;
+      let stamp, files = [], error = '';
+      try {
+        const folder = this.fileStore.playlistPath(row.folder_name);
+        const stat = fs.statSync(folder, { bigint: true });
+        if (!stat.isDirectory()) throw new Error('本地歌单文件夹不存在');
+        stamp = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
+        if (previous?.rootPath === this.rootPath && previous.folderName === row.folder_name && previous.stamp === stamp) { previous.checkedAt = now; continue; }
+        files = this.fileStore.listAudioFiles(row.folder_name);
+      } catch (failure) {
+        error = failure.code === 'ENOENT' ? '本地歌单文件夹不存在' : failure.message;
+        stamp = `error:${error}`;
+        if (previous?.rootPath === this.rootPath && previous.folderName === row.folder_name && previous.stamp === stamp) { previous.checkedAt = now; continue; }
+      }
+      this.localInventories.set(row.id, { rootPath: this.rootPath, folderName: row.folder_name, stamp, files, error, checkedAt: now });
+      this.localInventoryRevision++;
+    }
+    if (!id) {
+      const ids = new Set(rows.map((row) => row.id));
+      for (const key of this.localInventories.keys()) if (!ids.has(key)) { this.localInventories.delete(key); this.localInventoryRevision++; }
+      this.localInventoryDbRevision = this.db.revision;
+      this.localInventoryRoot = this.rootPath;
+      this.localInventoryCheckedAt = now;
+    }
+  }
+
+  mapLocal(row, trackRows, choices, deleteRemoved, inventory) {
+    const files = inventory?.files || [];
+    const byFilename = new Map(files.map((file) => [fileKey(file.name), file]));
+    const claimed = new Set();
+    const localTracks = [];
+    for (const track of trackRows) {
+      const key = fileKey(track.filename);
+      if (!byFilename.has(key) || claimed.has(key)) continue;
+      claimed.add(key);
+      localTracks.push({ ...dbTrack(track), filename: byFilename.get(key).name });
+    }
+    for (const file of files) {
+      if (claimed.has(fileKey(file.name))) continue;
+      localTracks.push({ id: localFileId(row, file.name), name: path.parse(file.name).name, filename: file.name,
+        artists: [], album: '', duration: 0, localOnly: true });
+    }
     const { added, removed, existing, needsSync } = buildSyncPlan(row, localTracks, choices, deleteRemoved);
     const decisions = new Map([...added, ...removed, ...existing].map((track) => [track.id, track]));
     const snapshot = parseJson(row.online_tracks_json, []);
@@ -183,15 +238,16 @@ class AppService {
     const basename = libraryRoot ? '音乐库根目录' : path.basename(row.folder_name);
     const displayName = sanitizeName(row.name) === basename ? row.name : `${row.name}（${basename}）`;
     let folderPath;
-    let pathError = '';
+    let pathError = inventory?.error || '';
     try { folderPath = this.fileStore.playlistPath(row.folder_name); }
-    catch (error) { folderPath = path.resolve(this.rootPath, row.folder_name); pathError = error.message; status = 'offline'; }
-    const revision = crypto.createHash('sha256').update(JSON.stringify([row.online_id, row.folder_name, row.added_json, row.removed_json, row.online_tracks_json, trackRows, choices, deleteRemoved])).digest('hex');
+    catch (error) { folderPath = path.resolve(this.rootPath, row.folder_name); pathError = error.message; }
+    if (pathError && !row.paused) status = 'offline';
+    const revision = crypto.createHash('sha256').update(JSON.stringify([this.rootPath, row.online_id, row.folder_name, row.added_json, row.removed_json, row.online_tracks_json, trackRows, files.map((file) => file.name), choices, deleteRemoved])).digest('hex');
     return {
       id: row.id, onlineId: row.online_id, name: row.name, folderName: row.folder_name,
       displayName,
       folderPath, createdAt: row.created_at,
-      trackCount: row.track_count, paused: Boolean(row.paused), offline: Boolean(row.offline || pathError),
+      trackCount: localTracks.length, paused: Boolean(row.paused), offline: Boolean(row.offline || pathError),
       previousName: row.previous_name, pendingName: row.pending_name,
       added, removed, existing, addedCount: added.length, removedCount: removed.length, existingCount: existing.length,
       onlineTracks, localTracks: localTracks.map((track) => decisions.get(track.id)),
@@ -202,6 +258,7 @@ class AppService {
   }
 
   localDetail(id) {
+    this.refreshLocalInventories(id);
     const item = this.localPlaylists().find((row) => row.id === id);
     if (!item) throw new Error('本地歌单不存在');
     return item;
@@ -234,6 +291,7 @@ class AppService {
     const knownTracks = new Map([...item.added, ...item.removed, ...item.existing].map((track) => [track.id, track]));
     for (const choice of changes) {
       if (!choice || !knownTracks.has(String(choice.id)) || !['add', 'remove', 'keep'].includes(choice.action)) throw new Error('歌曲或操作无效');
+      if (knownTracks.get(String(choice.id)).localOnly && choice.action === 'add') throw new Error('仅本地歌曲只能留存或删除');
       if (Object.hasOwn(choice, 'enabled') && typeof choice.enabled !== 'boolean') throw new Error('歌曲勾选格式不正确');
     }
     this.db.transaction(() => {
@@ -509,6 +567,8 @@ class AppService {
         this.db.db.run(`INSERT OR IGNORE INTO songs(track_id,name,artists,album,duration,entity_path,extension,size,created_at)
           VALUES (?,?,?,?,?,?,?,?,?)`, [track.id, track.name, JSON.stringify(track.artists), track.album, track.duration, adopted.entityPath, adopted.extension, adopted.size, Date.now()]);
         this.db.db.run('INSERT OR IGNORE INTO playlist_tracks(playlist_id,track_id,filename,linked_at) VALUES (?,?,?,?)', [localId, track.id, adopted.filename, Date.now()]);
+        const choice = this.db.get('SELECT action,enabled FROM track_choices WHERE playlist_id=? AND track_id=?', [localId, localFileId(row, adopted.filename)]);
+        if (choice) this.db.db.run('INSERT OR IGNORE INTO track_choices(playlist_id,track_id,action,enabled) VALUES (?,?,?,?)', [localId, track.id, choice.action, choice.enabled]);
       }
       for (const track of detail.tracks) {
         if (!track.coverUrl) continue;
@@ -846,6 +906,15 @@ class AppService {
   async applyRemovals(row) {
     const removedTrackIds = [];
     for (const track of this.localDetail(row.id).removed.filter((track) => track.syncSelected && track.local)) {
+      if (track.localOnly) {
+        // Unmatched files are never removed merely because they are absent online.
+        const choice = this.db.get('SELECT action,enabled FROM track_choices WHERE playlist_id=? AND track_id=?', [row.id, track.id]);
+        if (choice?.action === 'remove' && choice.enabled) {
+          await this.fileStore.removePlaylistLink(row.folder_name, track.filename);
+          this.db.run('DELETE FROM track_choices WHERE playlist_id=? AND track_id=?', [row.id, track.id]);
+        }
+        continue;
+      }
       const link = this.db.get('SELECT filename FROM playlist_tracks WHERE playlist_id=? AND track_id=?', [row.id, track.id]);
       if (link) await this.fileStore.removePlaylistLink(row.folder_name, link.filename);
       this.db.run('DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?', [row.id, track.id]);
@@ -951,12 +1020,15 @@ class AppService {
         JOIN local_playlists lp ON lp.id=pt.playlist_id`);
       await oldStore.migrateManagedLibrary(targetStore, playlists, songs, relations);
       this.db.transaction(() => {
+        this.db.db.run(`DELETE FROM track_choices WHERE track_id LIKE 'local-file:%' AND playlist_id IN
+          (SELECT id FROM local_playlists WHERE folder_name='.')`);
         for (const song of songs) {
           this.db.db.run('UPDATE songs SET entity_path=? WHERE track_id=?', [path.join(targetStore.songsPath, path.basename(song.entity_path)), song.track_id]);
         }
       });
     } else {
       this.db.transaction(() => {
+        this.db.db.run("DELETE FROM track_choices WHERE track_id LIKE 'local-file:%'");
         this.db.db.run('DELETE FROM playlist_tracks');
         this.db.db.run('DELETE FROM songs');
         this.db.db.run(`UPDATE local_playlists SET track_count=0,added_json='[]',removed_json='[]',existing_json='[]',online_tracks_json='[]',
@@ -1023,6 +1095,12 @@ class AppService {
 
 function dbTrack(row) {
   return { id: row.track_id, name: row.name, artists: parseJson(row.artists, []), album: row.album, duration: row.duration };
+}
+
+function fileKey(filename) { return process.platform === 'win32' ? filename.toLowerCase() : filename; }
+
+function localFileId(row, filename) {
+  return `local-file:${crypto.createHash('sha256').update(JSON.stringify([row.id, fileKey(row.folder_name), fileKey(filename)])).digest('hex')}`;
 }
 
 function sameSqlRows(left, right) {

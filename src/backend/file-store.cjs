@@ -80,7 +80,7 @@ class FileStore {
     const folderPath = this.playlistPath(folderName);
     if (!fs.existsSync(folderPath)) return [];
     return fs.readdirSync(folderPath, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && /\.(mp3|flac|wav|m4a|aac|ogg)$/i.test(entry.name))
+      .filter((entry) => entry.isFile() && /\.(mp3|flac|wav|m4a|aac|ogg|opus|aif|aiff|aifc|wma)$/i.test(entry.name))
       .map((entry) => ({ name: entry.name, path: path.join(folderPath, entry.name), normalized: normalizeText(path.parse(entry.name).name.replace(/\[\d+\]$/, '')) }));
   }
 
