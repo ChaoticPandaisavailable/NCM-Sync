@@ -196,7 +196,10 @@ class FileStore {
   async removePlaylistFolder(folderName) {
     const folderPath = this.playlistPath(folderName);
     if (!isPathInside(this.rootPath, folderPath) || folderPath === this.rootPath) throw new Error('拒绝删除不安全的目录');
-    if (fs.existsSync(folderPath)) await fsp.rm(folderPath, { recursive: true, force: true });
+    if (!fs.existsSync(folderPath)) return;
+    for (const file of this.listAudioFiles(folderName)) await this.removePlaylistLink(folderName, file.name);
+    // Child playlists, unrelated directories, sidecars and symbolic links remain untouched.
+    if ((await fsp.readdir(folderPath)).length === 0) await fsp.rmdir(folderPath);
   }
 
   async renamePlaylistFolder(oldName, newName) {
@@ -205,7 +208,23 @@ class FileStore {
     const to = this.playlistPath(path.join(path.dirname(oldName), sanitizeName(newName)));
     if (!isPathInside(this.rootPath, from) || !isPathInside(this.rootPath, to)) throw new Error('目录名称不安全');
     if (fs.existsSync(to)) throw new Error('目标文件夹已存在');
-    await fsp.rename(from, to);
+    const entries = await fsp.readdir(from, { withFileTypes: true });
+    if (entries.some((entry) => entry.isDirectory() || entry.isSymbolicLink())) {
+      // Renaming a parent playlist moves its own audio, leaving child paths unchanged.
+      await fsp.mkdir(to);
+      const moved = [];
+      try {
+        for (const file of this.listAudioFiles(oldName)) {
+          const target = path.join(to, file.name);
+          await moveFileExclusive(file.path, target);
+          moved.push({ source: file.path, target });
+        }
+      } catch (error) {
+        for (const file of moved.reverse()) await moveFileExclusive(file.target, file.source);
+        if ((await fsp.readdir(to)).length === 0) await fsp.rmdir(to);
+        throw error;
+      }
+    } else await fsp.rename(from, to);
     return path.relative(this.rootPath, to);
   }
 
@@ -254,11 +273,21 @@ class FileStore {
       if (fs.existsSync(target)) throw new Error(`目标音乐库中已存在同名歌曲：${relation.filename}`);
       if (fs.existsSync(source) && fs.lstatSync(source).isSymbolicLink()) throw new Error('歌曲路径不能是符号链接');
     }
-    await moveDirectory(this.songsPath, targetStore.songsPath);
-    for (const playlist of playlists) {
-      if (this.isLibraryFolder(playlist.folder_name)) continue;
-      await moveDirectory(this.playlistPath(playlist.folder_name), targetStore.playlistPath(playlist.folder_name));
+    // Move an outer mapped tree once, irrespective of parent/child insertion order.
+    const folders = playlists.filter((playlist) => !this.isLibraryFolder(playlist.folder_name))
+      .map((playlist) => playlist.folder_name).sort((left, right) => left.length - right.length);
+    const outerFolders = [];
+    for (const folder of folders) {
+      const source = this.playlistPath(folder);
+      if (outerFolders.some((parent) => isPathInside(this.playlistPath(parent), source))) continue;
+      const target = targetStore.playlistPath(folder);
+      if (fs.existsSync(target) && (!fs.statSync(target).isDirectory() || (await fsp.readdir(target)).length)) {
+        throw new Error(`目标目录不是空目录：${target}`);
+      }
+      outerFolders.push(folder);
     }
+    await moveDirectory(this.songsPath, targetStore.songsPath);
+    for (const folder of outerFolders) await moveDirectory(this.playlistPath(folder), targetStore.playlistPath(folder));
     const songPaths = new Map(songs.map((song) => [song.track_id, path.join(targetStore.songsPath, path.basename(song.entity_path))]));
     for (const relation of playlistTracks) {
       const entityPath = songPaths.get(relation.track_id);
@@ -285,6 +314,16 @@ class FileStore {
     }
     return false;
   }
+}
+
+async function moveFileExclusive(source, target) {
+  try { await fsp.link(source, target); }
+  catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+    await fsp.copyFile(source, target, fs.constants.COPYFILE_EXCL);
+  }
+  try { await fsp.unlink(source); }
+  catch (error) { await fsp.unlink(target); throw error; }
 }
 
 async function moveDirectory(source, target) {

@@ -229,7 +229,7 @@ test('NCM Sync 首次设置、扫描、排序、同步和安全删除完整桌�
     const actionWidths = await page.locator('.local-pane .pane-actions button').evaluateAll((buttons) => buttons.map((button) => Math.round(button.getBoundingClientRect().width)));
     expect(Math.abs(actionWidths[0] - actionWidths[1])).toBeLessThanOrEqual(1);
     await page.getByRole('button', { name: '− 删除本地歌单' }).click();
-    await expect(page.getByText('“删除本地歌单”会删除所选歌单文件夹及其中的所有文件。')).toBeVisible();
+    await expect(page.getByText('“删除本地歌单”只删除所选目录中的直属音频，保留子文件夹及其他文件；目录为空时一并移除。如果想保留全部歌曲，请使用“暂停同步”。')).toBeVisible();
     await page.getByLabel('下次不再询问').check();
     await page.getByRole('button', { name: '删除本地歌单', exact: true }).click();
     await expect(page.locator('.local-pane tbody tr:not(.empty-row)')).toHaveCount(0);

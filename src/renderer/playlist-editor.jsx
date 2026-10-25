@@ -179,7 +179,7 @@ export function MappingModal({ item, onlineId, data, busy, close, submit, browse
       <label>本地文件夹<div className="mapping-path"><input aria-label="映射的本地文件夹" placeholder="选择音乐库根文件夹或现有子文件夹" value={folder} onChange={(event) => { setFolder(event.target.value); setError(''); }} /><button type="button" disabled={busy} onClick={() => browse(folder || data.rootPath, setFolder, setError)}>浏览…</button></div></label>
       <button className="use-library-folder" type="button" disabled={busy || data.scanning || data.task.active} onClick={() => { setFolder(data.rootPath); setError(''); }}>使用音乐库文件夹</button>
       <p className="mapping-root">音乐库：{data.rootPath}</p>
-      <p className="hint">可选择音乐库根文件夹或现有子文件夹。根目录映射只处理直接位于根目录的歌曲，子文件夹保持独立；移除根目录映射会保留全部文件。</p>
+      <p className="hint">可选择音乐库根文件夹或现有子文件夹。每个歌单只管理所选目录的直属音频，父、子文件夹可分别映射；同一文件夹不能重复映射。移除根目录映射会保留全部文件。</p>
       {error && <p className="field-error" role="alert">{error}</p>}
       <div className="modal-actions"><button type="button" onClick={close}>取消</button><button className="primary" disabled={busy || data.scanning || data.task.active || !id || !folder}>保存映射</button></div>
     </form>

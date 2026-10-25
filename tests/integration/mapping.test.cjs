@@ -108,17 +108,19 @@ test('自定义映射支持任意名称和子层级，重映射保留原目录�
   assert.equal(fs.existsSync(path.join(root, '夜航测试集')), false);
 });
 
-test('映射拒绝库外路径、保留目录、重复来源以及嵌套目录', async (t) => {
+test('映射拒绝库外路径、保留目录、重复来源和重复目录，允许父子目录共存', async (t) => {
   const { root, service } = await fixture(t);
   const target = path.join(root, 'sets', 'mix'); fs.mkdirSync(target, { recursive: true });
   await assert.rejects(service.mapPlaylist('1001', path.dirname(root)), /音乐库内/);
   await assert.rejects(service.mapPlaylist('1001', path.join(root, 'songs')), /实体库/);
   await assert.rejects(service.mapPlaylist('1001', path.join(root, '.cloudmusic')), /应用数据/);
   await service.mapPlaylist('1001', target);
-  await assert.rejects(service.mapPlaylist('1002', target), /重复或互相嵌套/);
-  await assert.rejects(service.mapPlaylist('1002', path.join(root, 'sets')), /重复或互相嵌套/);
+  await assert.rejects(service.mapPlaylist('1002', target), /重复映射/);
+  const parent = await service.mapPlaylist('1002', path.join(root, 'sets'));
+  assert.equal(parent.folderPath, path.join(root, 'sets'));
   fs.mkdirSync(path.join(target, 'child'));
-  await assert.rejects(service.mapPlaylist('1002', path.join(target, 'child')), /重复或互相嵌套/);
+  const child = await service.mapPlaylist('1999', path.join(target, 'child'));
+  assert.equal(child.folderPath, path.join(target, 'child'));
   fs.mkdirSync(path.join(root, 'other'));
   await assert.rejects(service.mapPlaylist('1001', path.join(root, 'other')), /已有本地映射/);
 });

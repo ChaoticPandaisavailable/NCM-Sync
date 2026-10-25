@@ -192,8 +192,8 @@ function App() {
     if (data.settings.removeLocalDontAsk) { remove(); return; }
     setModal({ type: 'confirm', title: onlyLibrary ? '移除歌单映射' : '删除本地歌单', dangerous: !onlyLibrary, showDontAsk: true,
       message: onlyLibrary ? '移除音乐库根目录的歌单映射，保留音乐库中的全部文件。' : includesLibrary
-        ? '所选子文件夹歌单会删除目录与文件；音乐库根目录歌单只移除映射，保留根目录全部文件。'
-        : '“删除本地歌单”会删除所选歌单文件夹及其中的所有文件。如果想保留本地文件，请使用“暂停同步”。',
+        ? '所选文件夹歌单只删除直属音频，保留子文件夹及其他文件；音乐库根目录歌单只移除映射，保留根目录全部文件。'
+        : '“删除本地歌单”只删除所选目录中的直属音频，保留子文件夹及其他文件；目录为空时一并移除。如果想保留全部歌曲，请使用“暂停同步”。',
       confirmText: onlyLibrary ? '移除映射' : '删除本地歌单', onConfirm: remove });
   }
   function confirmCancel() {

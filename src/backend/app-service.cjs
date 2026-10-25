@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { parseJson, normalizeInterval, sanitizeName, isPathInside } = require('./utils.cjs');
+const { parseJson, normalizeInterval, sanitizeName } = require('./utils.cjs');
 const { CancelledError } = require('./task-manager.cjs');
 const { FileStore } = require('./file-store.cjs');
 const { writeAudioTags } = require('./tag-writer.cjs');
@@ -307,19 +307,17 @@ class AppService {
 
   validateMapping(folderName, exceptId = '') {
     const target = this.fileStore.playlistPath(folderName);
-    for (const row of this.db.all('SELECT id,folder_name FROM local_playlists')) {
+    for (const row of this.db.all('SELECT id,name,folder_name FROM local_playlists')) {
       if (row.id === exceptId) continue;
       const other = path.resolve(this.rootPath, row.folder_name);
-      if (this.mappingPathsOverlap(target, other)) throw new Error('目标目录与其他歌单目录重复或互相嵌套，请选择独立文件夹');
+      if (this.mappingPathsOverlap(target, other)) throw new Error(`目标文件夹已映射到“${row.name}”（${row.folder_name}），不能重复映射同一文件夹`);
     }
     return target;
   }
 
   mappingPathsOverlap(left, right) {
-    if (path.relative(left, right) === '') return true;
-    // A root mapping owns direct files only; its subfolders remain independent.
-    if (path.relative(this.rootPath, left) === '' || path.relative(this.rootPath, right) === '') return false;
-    return pathsOverlap(left, right);
+    // Each mapping owns direct audio files only, so parent and child directories are independent.
+    return path.relative(left, right) === '';
   }
 
   async mapPlaylist(onlineId, folderPath, localId = '') {
@@ -588,7 +586,7 @@ class AppService {
     let pendingName = row.custom_mapping || path.basename(folderName) === targetFolderName ? null : detail.name;
     if (pendingName && this.db.getSettings().renamePolicy === 'auto') {
       try {
-        folderName = await this.fileStore.renamePlaylistFolder(row.folder_name, detail.name);
+        folderName = await this.renameMappedFolder(row, detail.name);
         pendingName = null;
       } catch { /* 保留提示，让用户处理同名冲突 */ }
     }
@@ -951,9 +949,10 @@ class AppService {
   async removeLocal(ids) {
     this.assertEditable();
     const removedTrackIds = [];
-    for (const id of ids || []) {
-      const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [id]);
-      if (!row) continue;
+    const rows = [...new Set(ids || [])].map((id) => this.db.get('SELECT * FROM local_playlists WHERE id=?', [id]))
+      .filter(Boolean).sort((left, right) => right.folder_name.length - left.folder_name.length);
+    for (const row of rows) {
+      const id = row.id;
       if (!this.fileStore.isLibraryFolder(row.folder_name)) {
         removedTrackIds.push(...this.db.all('SELECT track_id FROM playlist_tracks WHERE playlist_id=?', [id]).map((track) => track.track_id));
         await this.fileStore.removePlaylistFolder(row.folder_name);
@@ -961,6 +960,8 @@ class AppService {
       this.db.run('DELETE FROM playlist_tracks WHERE playlist_id=?', [id]);
       this.db.run('DELETE FROM local_playlists WHERE id=?', [id]);
     }
+    const removedOnlineIds = new Set(rows.map((row) => row.online_id));
+    this.db.setSettings({ syncPlaylistIds: [...this.selectedOnlineIds()].filter((id) => !removedOnlineIds.has(id)) });
     await this.pruneOrphanedSongs(removedTrackIds);
     return this.localPlaylists();
   }
@@ -984,9 +985,30 @@ class AppService {
     this.assertEditable();
     const row = this.db.get('SELECT * FROM local_playlists WHERE id=?', [id]);
     if (!row) throw new Error('歌单不存在');
-    const newName = await this.fileStore.renamePlaylistFolder(row.folder_name, row.name);
+    const newName = await this.renameMappedFolder(row, row.name);
     this.db.run('UPDATE local_playlists SET folder_name=?,custom_mapping=0,previous_name=NULL,pending_name=NULL WHERE id=?', [newName, id]);
     return this.localPlaylists();
+  }
+
+  async renameMappedFolder(row, name) {
+    if (this.fileStore.isLibraryFolder(row.folder_name)) throw new Error('音乐库根目录不能随歌单重命名');
+    this.validateMapping(path.join(path.dirname(row.folder_name), sanitizeName(name)), row.id);
+    const folderName = await this.fileStore.renamePlaylistFolder(row.folder_name, name);
+    this.db.transaction(() => {
+      // Local-only choices are tied to their directory; retain them when its audio files move.
+      for (const file of this.fileStore.listAudioFiles(folderName)) {
+        const previousId = localFileId(row, file.name);
+        const nextId = localFileId({ ...row, folder_name: folderName }, file.name);
+        if (previousId === nextId) continue;
+        const choice = this.db.get('SELECT action,enabled FROM track_choices WHERE playlist_id=? AND track_id=?', [row.id, previousId]);
+        if (!choice) continue;
+        this.db.db.run(`INSERT INTO track_choices(playlist_id,track_id,action,enabled) VALUES (?,?,?,?)
+          ON CONFLICT(playlist_id,track_id) DO UPDATE SET action=excluded.action,enabled=excluded.enabled`, [row.id, nextId, choice.action, choice.enabled]);
+        this.db.db.run('DELETE FROM track_choices WHERE playlist_id=? AND track_id=?', [row.id, previousId]);
+      }
+      this.db.db.run('UPDATE local_playlists SET folder_name=? WHERE id=?', [folderName, row.id]);
+    });
+    return folderName;
   }
 
   async openLocal(id) {
@@ -1128,10 +1150,6 @@ function indexFolders(folders) {
     byName.get(name).push(folder);
   }
   return { byPath, byName };
-}
-
-function pathsOverlap(left, right) {
-  return isPathInside(left, right) || isPathInside(right, left);
 }
 
 function flattenArtists(artist) {
